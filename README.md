@@ -1,7 +1,7 @@
 # wuji-glove-teleop-mujoco
 
 用 **Wuji Glove → `wuji_sdk.retargeting`(SDK 内置 retargeting)→ MuJoCo** 实时预览灵巧手遥操效果。
-无手套时可用录制数据回放；也提供一套 ROS2 两节点管线（方案 B：retarget 节点发 topic → MuJoCo 订阅）。
+无手套时可用录制数据回放；也提供一套 ROS2 两节点管线（retarget 节点发 topic → MuJoCo 订阅）。
 
 > **重要说明**：本仓库**不包含任何 retargeting 算法实现**，仅通过 `wuji-sdk` 的**公开 API**
 > （`wuji_sdk.retargeting.RetargetSession`）调用其内置重定向。算法本体在 `wuji-sdk` wheel 内的
@@ -51,7 +51,7 @@ MUJOCO_GL=egl ./venv312/bin/python glove_teleop_live.py --record out.mp4 --secon
 MUJOCO_GL=egl ./venv312/bin/python mujoco_teleop_replay.py --mode video --out teleop.mp4 --frames 900
 ```
 
-### 方案 B：ROS2 两节点（retarget 发 topic → MuJoCo 订阅）
+### ROS2 两节点管线（retarget 发 topic → MuJoCo 订阅）
 
 ```bash
 source /opt/ros/<distro>/setup.bash
