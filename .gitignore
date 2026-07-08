@@ -1,0 +1,8 @@
+venv312/
+__pycache__/
+*.pyc
+# generated media artifacts
+*.mp4
+*.png
+*.jpg
+*.log

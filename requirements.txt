@@ -1,0 +1,7 @@
+# Python 3.12 required (wuji_sdk.retargeting compiled ext is cp312-only)
+wuji-sdk[retarget]==2026.7.2
+mujoco
+imageio
+imageio-ffmpeg
+opencv-python
+numpy
