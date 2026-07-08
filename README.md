@@ -1,7 +1,12 @@
 # wuji-glove-teleop-mujoco
 
-用 **Wuji Glove → `wuji_sdk.retargeting`(SDK 内置闭源 retargeting)→ MuJoCo** 实时预览灵巧手遥操效果。
+用 **Wuji Glove → `wuji_sdk.retargeting`(SDK 内置 retargeting)→ MuJoCo** 实时预览灵巧手遥操效果。
 无手套时可用录制数据回放；也提供一套 ROS2 两节点管线（方案 B：retarget 节点发 topic → MuJoCo 订阅）。
+
+> **重要说明**：本仓库**不包含任何 retargeting 算法实现**，仅通过 `wuji-sdk` 的**公开 API**
+> （`wuji_sdk.retargeting.RetargetSession`）调用其内置重定向。算法本体在 `wuji-sdk` wheel 内的
+> 编译扩展里，不在本仓库、也不随本仓库分发。本仓库是一套 **ROS2 / MuJoCo 集成方案**，
+> 由使用者自行 `pip install "wuji-sdk[retarget]"` 获取算法。
 
 > 手部重定向用的是 `wuji-sdk` wheel 里内置的 retargeting（`pip install "wuji-sdk[retarget]"`），
 > 与官方示例 `wuji-sdk/examples/python/retargeting/1.teleop_real.py` 同一套算法；这里把输出喂给
