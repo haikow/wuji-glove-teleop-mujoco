@@ -227,6 +227,11 @@ def main():
     cam.azimuth, cam.elevation, cam.distance = 180, -20, 0.42
     cam.lookat[:] = [0, 0, 0.05]
 
+    # --show-input 也走 EGL 离屏路径（GLFW 在坏 GLX 的 :1 上崩，这条能出图/录像）
+    fk_ids = [mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, b) for b in ROBOT_FK_BODY]
+    palm_id = fk_ids[0]
+    can_align = args.show_input and palm_id >= 0
+
     cv2 = None
     if not args.headless:
         import cv2 as _cv2
@@ -261,6 +266,15 @@ def main():
             d.qpos[:m.nq] = np.clip(qpos, jlo, jhi)   # 运动学置位：精确呈现
             mujoco.mj_forward(m, d)
             ren.update_scene(d, cam)
+            if can_align:
+                scn = ren.scene
+                wpos = d.xpos[palm_id]
+                wrot = d.xmat[palm_id].reshape(3, 3)
+                tkp = apply_mediapipe_transformations(last_kp.astype(np.float64), side)
+                _draw_layer(scn, tkp @ wrot.T + wpos, LAYER_INPUT)   # 橙：人手输入
+                fk = np.array([d.xpos[i] if i >= 0 else [np.nan] * 3
+                               for i in fk_ids], float)
+                _draw_layer(scn, fk, LAYER_FK)                       # 白：机器人 FK
             rgb = ren.render()
 
             frames += 1

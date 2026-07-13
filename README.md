@@ -29,21 +29,45 @@ python3.12 -m venv --system-site-packages venv312
 
 ### 实时手套遥操（看效果）
 
+**左手 / 右手启动**：手型由 `--side` 决定（留空则自动读手套 `hand_side()`），
+手套 `--glove-sn` 换成你现场那只的 SN（脚本默认值仅示例，通常要覆盖）。
+
 ```bash
-# 官方 MuJoCo 交互窗口（可轨道/关节可视化）
-./venv312/bin/python glove_teleop_live.py --viewer
+# 左手（加载 mjcf/left.xml，SDK 内部自动做左手 Y 镜像）
+MUJOCO_GL=egl ./venv312/bin/python glove_teleop_live.py \
+    --glove-sn <左手手套SN> --side left --record left.mp4 --seconds 20
 
-# 叠加"人手输入骨架"对比（橙=输入，白=机器人FK，对齐到 palm_link）
-./venv312/bin/python glove_teleop_live.py --viewer --show-input
-
-# 只看手（隐藏面板+关节叠加层）
-./venv312/bin/python glove_teleop_live.py --viewer --clean
-
-# 无显示器/CI：EGL 离屏 + 录像
-MUJOCO_GL=egl ./venv312/bin/python glove_teleop_live.py --record out.mp4 --seconds 20
+# 右手（加载 mjcf/right.xml）
+MUJOCO_GL=egl ./venv312/bin/python glove_teleop_live.py \
+    --glove-sn <右手手套SN> --side right --record right.mp4 --seconds 20
 ```
 
-默认手套 SN / side / 手型可用 `--glove-sn / --side / --hand-model` 覆盖。
+其它开关（左右手通用）：
+
+```bash
+# EGL 离屏 + 录像（无显示器/CI/桌面合成器不稳时，最稳的看效果方式）
+MUJOCO_GL=egl ./venv312/bin/python glove_teleop_live.py --side left --record out.mp4 --seconds 20
+
+# 叠加"人手输入骨架"对齐对比（橙=手套输入，白=机器人FK，对齐到 palm_link）
+# 现已支持 EGL 离屏路径，不再必须 GLFW，可直接录像/截图：
+MUJOCO_GL=egl ./venv312/bin/python glove_teleop_live.py --side left --show-input --record align.mp4 --seconds 20
+
+# 官方 MuJoCo 交互窗口（GLFW，可轨道/接触可视化；需要可用 GLX 的桌面）
+./venv312/bin/python glove_teleop_live.py --side left --viewer --show-input
+
+# 二代手模型
+... --hand-model wuji_hand_2
+```
+
+> 注：GLFW 交互窗口和 cv2 on-screen 窗口都依赖桌面 GLX/合成器；在坏 GLX 或合成器抖动的
+> `DISPLAY` 上会崩。要稳定看效果就用 `MUJOCO_GL=egl ... --record`（EGL 纯离屏，不碰桌面）。
+
+### 采集手套 + 触觉原始数据（CSV/JSONL）
+
+```bash
+# hand_skeleton(21×3) + hand_joint_angles + tactile，带主机时间戳，落盘 CSV 宽表 + JSONL
+./venv312/bin/python record_glove_data.py --glove-sn <手套SN> --seconds 20 --out rec
+```
 
 ### 无手套：录制数据回放
 
