@@ -120,6 +120,9 @@ def main():
     ap.add_argument("--input-offset", default="0,0.12,0.05",
                     help="输入骨架相对机器人手的摆放偏移 x,y,z（米）")
     ap.add_argument("--headless", action="store_true", help="不开窗（自测/录制用）")
+    ap.add_argument("--keep-user", action="store_true",
+                    help="不切 default 用户，保留当前已标定用户的 per-user 手模型"
+                         "（做完 Studio/calibrate 标定后想看到自己标定效果时用这个）")
     ap.add_argument("--w", type=int, default=960)
     ap.add_argument("--h", type=int, default=720)
     args = ap.parse_args()
@@ -127,15 +130,23 @@ def main():
     # 连手套
     from wuji_sdk import ConnectOptions
     mgr = SdkManager.instance()
-    # 关键：切到 SDK 默认用户，让手套跑"内置默认手 URDF"，而不是每用户 IK 标定
-    # （官方 1.teleop_real.py 明确：per-user 标定有毛边，内置模型跟随更可靠）。
+    # 默认：切到 SDK 默认用户，跑"内置默认手 URDF"（通用、跟随稳，但忽略 per-user 标定）。
+    # --keep-user：保留当前用户，加载其 per-user 标定手模型（标定后想看自己的零位/手型效果）。
     previous_user = None
-    try:
-        previous_user = mgr.current_user()
-        mgr.switch_to_default_user()
-        print("switched to default SDK user (built-in URDF)")
-    except Exception as e:
-        print(f"[warn] switch_to_default_user failed: {e}")
+    if args.keep_user:
+        try:
+            cur = mgr.current_user()
+            print(f"keep-user: 使用当前已标定用户 {cur.get('display_name')} "
+                  f"({cur.get('user_id')}) 的 per-user 手模型")
+        except Exception as e:
+            print(f"[warn] current_user query failed: {e}")
+    else:
+        try:
+            previous_user = mgr.current_user()
+            mgr.switch_to_default_user()
+            print("switched to default SDK user (built-in URDF)；标定后想看自己效果请加 --keep-user")
+        except Exception as e:
+            print(f"[warn] switch_to_default_user failed: {e}")
     g = None
     for attempt in range(1, 5):
         try:
