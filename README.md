@@ -3,6 +3,10 @@
 用 **Wuji Glove → `wuji_sdk.retargeting`(SDK 内置 retargeting)→ MuJoCo** 实时预览灵巧手遥操效果。
 无手套时可用录制数据回放；也提供一套 ROS2 两节点管线（retarget 节点发 topic → MuJoCo 订阅）。
 
+> 📖 **客户使用指导**（标定 URDF 加载 + 数据录制的完整排查步骤）见
+> [`docs/customer-guide-calibration-and-recording.md`](docs/customer-guide-calibration-and-recording.md)。
+> 关键结论：**默认用户永远回落内置 URDF、忽略标定；要加载标定必须用具名用户。**
+
 > **重要说明**：本仓库**不包含任何 retargeting 算法实现**，仅通过 `wuji-sdk` 的**公开 API**
 > （`wuji_sdk.retargeting.RetargetSession`）调用其内置重定向。算法本体在 `wuji-sdk` wheel 内的
 > 编译扩展里，不在本仓库、也不随本仓库分发。本仓库是一套 **ROS2 / MuJoCo 集成方案**，
