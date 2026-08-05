@@ -159,12 +159,6 @@ python record_glove_data.py --glove-sn <你的手套SN> --seconds 20 --out rec
 | `tactile_point_cloud` | 触点 3D 位置 + 压力（LBS 蒙皮算） | 需 `hand_skeleton` + `tactile_zones` 都在出帧（即标定手模型正常） |
 | `tactile_binary` / `tactile_residual` | 接触 / 残差 | 需**有效的 744 维接触模型**；缺失或旧格式会 fail-closed（空）→ 做 `wuji calib tactile` |
 
-### 关于"运动慢半拍 / 延迟"
-
-- 消费端**只取最新帧、丢弃积压**（`record_glove_data.py` 已这么做）：`while (x := sub.recv()) is not None: last = x`。积压旧帧是延迟主因。
-- 固件时间同步：确保 `time_sync=true`（较新固件已修 emf 时间漂移）。
-- 仿真显示用 `d.qpos = qpos; mj_forward`（运动学置位），**不要** `ctrl + mj_step`（软执行器会欠到位，看着像跟不上，其实是仿真欠驱动，不是数据延迟）。
-
 ---
 
 ## 四、连接的手型（左/右）
