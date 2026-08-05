@@ -104,11 +104,14 @@ def main() -> int:
         # scan() 只给 SN/transport，不给型号——逐个连接后按语义类型分类。
         for d in mgr.scan():
             dev = mgr.connect(sn=d.sn, device_name=d.sn, options=no_bridge)
+            # 一代手 native 的 scan sn(如 347A…)与连接后的 serial_number(如 LQSQJR…)不一致，
+            # 两个都拿来匹配 --hand-sn / --glove-sn。
+            ids = {str(d.sn), str(getattr(dev, "serial_number", ""))}
             if isinstance(dev, (WujiHand, WujiHand2)):
-                if not args.hand_sn or dev.serial_number == args.hand_sn:
+                if not args.hand_sn or args.hand_sn in ids:
                     hand = dev            # 多只手时用 --hand-sn 指定，否则取扫到的最后一只
             elif isinstance(dev, WujiGlove):
-                if not args.glove_sn or dev.serial_number == args.glove_sn:
+                if not args.glove_sn or args.glove_sn in ids:
                     glove = dev
 
         if hand is None or glove is None:
