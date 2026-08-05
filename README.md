@@ -19,9 +19,9 @@
 
 ## 环境（重要）
 
-**Python 版本随 SDK 版本**：`wuji-sdk` **2026.7.21 / 8.3 起** retargeting 原生化，提供 **cp312 + cp313**
-wheel（Python **3.12 / 3.13** 均可，实测 3.13 下 `RetargetSession.for_hand`/`step` 正常）；**≤ 7.15** 只有
-cp312、需 Python 3.12。3.12 同时是 ROS2 Humble/Kilted 的 ABI，一套环境通吃，故本仓仍以 3.12 为默认。
+**Python 版本随 SDK 版本**：`wuji-sdk` **2026.7.21 / 8.3 起** retargeting 原生化，提供 **cp312 / cp313 / cp314**
+wheel（Python **3.12 / 3.13 / 3.14 均可**，实测 3.13、3.14 下 `RetargetSession.for_hand`/`step` 正常）；
+**≤ 7.15** 只有 cp312、需 Python 3.12。3.12 同时是 ROS2 Humble/Kilted 的 ABI，一套环境通吃，故本仓仍以 3.12 为默认。
 
 ```bash
 python3.12 -m venv --system-site-packages venv312
