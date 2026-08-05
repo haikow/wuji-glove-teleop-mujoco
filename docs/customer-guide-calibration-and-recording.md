@@ -29,9 +29,13 @@
 ### 方式 A：CLI 标定（推荐；平台无关，最省事）
 
 ```bash
-# 0) 装配套 CLI（到 wuji-cli-dev Release 下 wuji_2026.8.3_amd64 / _arm64）
-chmod +x wuji_2026.8.3_amd64 && mv wuji_2026.8.3_amd64 ~/bin/wuji
-wuji --version                              # 2026.8.3
+# 0) 装配套 CLI —— 从公开仓下载：https://github.com/wuji-technology/wuji-cli/releases
+#    x86_64:
+curl -L -o wuji https://github.com/wuji-technology/wuji-cli/releases/download/v2026.8.3/wuji_2026.8.3_amd64
+#    ARM64（树莓派 / RK3588 等）改用：
+#    curl -L -o wuji https://github.com/wuji-technology/wuji-cli/releases/download/v2026.8.3/wuji_2026.8.3_arm64
+chmod +x wuji && mv wuji ~/bin/wuji          # 确保 ~/bin 在 PATH 里
+wuji --version                               # 2026.8.3
 
 # 1) 建具名用户并切换（默认用户不能标定）
 wuji user create cust_calib --switch
