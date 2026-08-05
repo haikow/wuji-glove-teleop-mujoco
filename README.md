@@ -1,6 +1,6 @@
 # wuji-glove-teleop-mujoco
 
-用 **Wuji Glove → `wuji_sdk.retargeting`(SDK 内置 retargeting)→ MuJoCo** 实时预览灵巧手遥操效果。
+用 **Wuji Glove → SDK 内置 retargeting → MuJoCo** 实时预览灵巧手遥操效果。
 无手套时可用录制数据回放；也提供一套 ROS2 两节点管线（retarget 节点发 topic → MuJoCo 订阅）。
 
 > 📖 **客户使用指导**（标定 URDF 加载 + 数据录制的完整排查步骤）见
@@ -19,8 +19,9 @@
 
 ## 环境（重要）
 
-**必须 Python 3.12**：`wuji_sdk.retargeting` 的编译扩展只提供 cp312 ABI（Python 3.13/3.14 会
-`import` 到但拿不到 `Retargeter`）。3.12 同时也是 ROS2 Humble/Kilted 的 ABI，一套环境通吃。
+**Python 版本随 SDK 版本**：`wuji-sdk` **2026.7.21 / 8.3 起** retargeting 原生化，提供 **cp312 + cp313**
+wheel（Python **3.12 / 3.13** 均可，实测 3.13 下 `RetargetSession.for_hand`/`step` 正常）；**≤ 7.15** 只有
+cp312、需 Python 3.12。3.12 同时是 ROS2 Humble/Kilted 的 ABI，一套环境通吃，故本仓仍以 3.12 为默认。
 
 ```bash
 python3.12 -m venv --system-site-packages venv312
@@ -129,5 +130,5 @@ source /opt/ros/<distro>/setup.bash
 
 - 手模型 `wuji_hand_description/`（URDF/MJCF/mesh）来自
   [wuji-technology/wuji_hand_description](https://github.com/wuji-technology/wuji_hand_description)。
-- retargeting 算法：`wuji-sdk`（`wuji_sdk.retargeting`）。
+- retargeting 算法：`wuji-sdk` 内置（8.3 起顶层 `HandModel` / `RetargetSession`；≤7.15 在 `wuji_sdk.retargeting` 子模块）。
 - 可视化参考：[wuji-technology/wuji-retargeting](https://github.com/wuji-technology/wuji-retargeting) 的 `tuning_tool`。
