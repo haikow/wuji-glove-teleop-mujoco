@@ -20,7 +20,8 @@ import mujoco.viewer  # noqa: F401  官方交互窗口（--viewer）
 
 os.environ.setdefault("MUJOCO_GL", "egl")
 
-from wuji_sdk import SdkManager, Handedness, retargeting
+from wuji_sdk import SdkManager, Handedness
+from retarget_compat import HandModel, RetargetSession  # 兼容 8.3 顶层 / ≤7.15 子模块
 
 MJCF_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                         "wuji_hand_description", "mjcf")
@@ -168,9 +169,9 @@ def main():
     print(f"glove {args.glove_sn} connected, side={side}")
 
     sub = g.hand_skeleton().subscribe()
-    model = (retargeting.HandModel.WujiHand2 if args.hand_model == "wuji_hand_2"
-             else retargeting.HandModel.WujiHand)
-    sess = retargeting.RetargetSession.for_hand(model, side=hd)
+    model = (HandModel.WujiHand2 if args.hand_model == "wuji_hand_2"
+             else HandModel.WujiHand)
+    sess = RetargetSession.for_hand(model, side=hd)
     sess.reset()
 
     m = mujoco.MjModel.from_xml_path(os.path.join(MJCF_DIR, f"{side}.xml"))

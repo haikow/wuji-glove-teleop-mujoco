@@ -7,14 +7,15 @@
 > [`docs/customer-guide-calibration-and-recording.md`](docs/customer-guide-calibration-and-recording.md)。
 > 关键结论：**默认用户永远回落内置 URDF、忽略标定；要加载标定必须用具名用户。**
 
-> **重要说明**：本仓库**不包含任何 retargeting 算法实现**，仅通过 `wuji-sdk` 的**公开 API**
-> （`wuji_sdk.retargeting.RetargetSession`）调用其内置重定向。算法本体在 `wuji-sdk` wheel 内的
-> 编译扩展里，不在本仓库、也不随本仓库分发。本仓库是一套 **ROS2 / MuJoCo 集成方案**，
-> 由使用者自行 `pip install "wuji-sdk[retarget]"` 获取算法。
-
-> 手部重定向用的是 `wuji-sdk` wheel 里内置的 retargeting（`pip install "wuji-sdk[retarget]"`），
-> 与官方示例 `wuji-sdk/examples/python/retargeting/1.teleop_real.py` 同一套算法；这里把输出喂给
-> MuJoCo 仿真手而不是真机，方便直接看效果。
+> **重要说明**：本仓库**不包含任何 retargeting 算法实现**，只调用 `wuji-sdk` 内置重定向，
+> 与官方示例 `wuji-sdk/examples/python/retargeting/1.teleop_real.py` 同一套算法。本仓库是一套
+> **ROS2 / MuJoCo 集成方案** + 真机遥操脚本。
+>
+> **retargeting 打包随版本变化（脚本已用 `retarget_compat.py` 兼容两者，无需手动区分）**：
+> - **2026.7.21 / 8.3 起**：retargeting 已**原生化**，`HandModel` / `RetargetSession` **顶层导入**
+>   （`from wuji_sdk import HandModel, RetargetSession`），**不再需要 `[retarget]` extra**，
+>   `pip install "wuji-sdk"` 即可。
+> - **≤ 2026.7.15**：在 `wuji_sdk.retargeting` 子模块，需 `pip install "wuji-sdk[retarget]"`。
 
 ## 环境（重要）
 
@@ -66,6 +67,29 @@ MUJOCO_GL=egl ./venv312/bin/python glove_teleop_live.py --side left --show-input
 > 注：GLFW 交互窗口和 cv2 on-screen 窗口都依赖桌面 GLX/合成器；在坏 GLX 或合成器抖动的
 > `DISPLAY` 上会崩。要稳定看效果就用 `MUJOCO_GL=egl ... --record`（EGL 纯离屏，不碰桌面）。
 
+### 真机遥操（驱动真手：一代 / 二代，自动识别）
+
+把 retarget 结果直接下发到**真手**（不是仿真）。一代 Wuji Hand 走 `realtime_controller`，
+二代 Wuji Hand 2 走 MIT `joint_command`，脚本按连接到的设备类型自动选择。
+
+> ⚠️ **安全**：会**使能真手并让它实时跟随你的手运动**。跑前把手固定、周围无障碍、急停/断电在手边；
+> Ctrl+C 或到时自动 disable。
+
+```bash
+# 自动扫描；内置 URDF；跑到 Ctrl+C
+./venv312/bin/python glove_teleop_realhand.py --side right
+
+# 用你自己标定的 per-user 手模型（连接前不切默认用户，加载 users/<uid>/models/right_hand.urdf）
+./venv312/bin/python glove_teleop_realhand.py --side right --keep-user --seconds 20
+
+# 总线上同时有一代+二代手时，用 --hand-sn 指定目标手（一代手 SN 形如 347A…）
+./venv312/bin/python glove_teleop_realhand.py --hand-sn <目标手SN> --glove-sn <手套SN> --side right
+```
+
+- **默认**切到内置默认 URDF（跟随更稳，照官方 `1.teleop_real.py`）；**`--keep-user`** 才用你的标定。
+- 是否加载了标定，看连接日志：`online hand_model: loading user hand model from …/right_hand.urdf`
+  = 已加载；`using built-in default URDF` = 内置。
+
 ### 采集手套 + 触觉原始数据（CSV/JSONL）
 
 ```bash
@@ -92,8 +116,10 @@ source /opt/ros/<distro>/setup.bash
 
 - **仿真用运动学显示**：MJCF 的 position 执行器 `kp` 很软（2/1/0.8），`ctrl+mj_step` 会严重欠到位
   （握拳只弯一点）。遥操可视化改用 `d.qpos[:] = retarget输出; mj_forward`，精确呈现姿态。
-- **连手套前 `switch_to_default_user()`**：让手套跑内置默认手 URDF（跟随更可靠），退出还原；
-  连接用 `ConnectOptions(enable_bridge=False)`。照官方 `1.teleop_real.py`。
+- **连手套前 `switch_to_default_user()`**：默认让手套跑内置默认手 URDF（跟随更可靠），退出还原；
+  连接用 `ConnectOptions(enable_bridge=False)`。照官方 `1.teleop_real.py`。要用**自己的标定手模型**
+  就加 `--keep-user`（保留当前具名用户，加载其 `right_hand.urdf`）——标定/加载细节见
+  [`docs/customer-guide-calibration-and-recording.md`](docs/customer-guide-calibration-and-recording.md)。
 - **`step()` 输出已是固件关节序**，与 MJCF 的 `finger1_joint1..finger5_joint4` 一一对应，直接下发。
 - **输入骨架对齐**：`apply_mediapipe_transformations` 后经机器人 `palm_link` 位姿搬到世界（同官方
   `tuning_tool` 的做法）。样式照 `wuji_retargeting/viz/skeleton_drawer.py` 的 `DEFAULT_LAYER_CONFIG`。
