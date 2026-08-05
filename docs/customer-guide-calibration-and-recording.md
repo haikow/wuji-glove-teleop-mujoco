@@ -95,6 +95,13 @@ wuji user switch cust_calib
 python 2.recording.py
 ```
 
+> 🕹️ **标定加载好后想直接驱动真手遥操**：用本仓库的 `glove_teleop_realhand.py`
+> （一代 / 二代手自动识别，`--keep-user` 加载你的标定手模型）：
+> ```bash
+> ./venv312/bin/python glove_teleop_realhand.py --side right --keep-user
+> #  仿真预览用 glove_teleop_live.py（见 README「实时手套遥操」）
+> ```
+
 ### 验证是否真加载了
 
 把日志级别设到 info，连接时看这行：
