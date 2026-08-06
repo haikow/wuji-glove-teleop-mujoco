@@ -20,25 +20,23 @@ FROM ros:kilted-ros-base
 ARG DEBIAN_FRONTEND=noninteractive
 
 # 系统依赖：
-#  - python3-pip：装 pip 依赖（24.04 系统 Python 就是 3.12，与 Kilted 的 rclpy 对齐）
-#  - libusb-1.0-0：wuji-sdk USB transport（手套 / 一代手；二代手走以太网不需要）
-#  - libgl1/libegl1/libglib2.0-0/ffmpeg：mujoco / opencv / imageio-ffmpeg 渲染与编码
+#  - python3-pip：装 wuji-sdk（24.04 系统 Python 就是 3.12，与 Kilted 的 rclpy 对齐）
+#  - libusb-1.0-0：wuji-sdk USB transport（手套 / 一代手；二代手走以太网不需要，留着无害）
 #  - ros-kilted-sensor-msgs / geometry-msgs：节点用到的消息（ros-base 通常已含，显式确保）
 RUN apt-get update && apt-get install -y --no-install-recommends \
         python3-pip git git-lfs \
-        libusb-1.0-0 libgl1 libegl1 libglib2.0-0 ffmpeg \
+        libusb-1.0-0 \
         ros-kilted-sensor-msgs ros-kilted-geometry-msgs \
     && rm -rf /var/lib/apt/lists/*
 
-# Python 依赖装进系统 Python 3.12（容器内可 --break-system-packages 绕过 PEP668）。
-# 源 setup.bash 后，python3 同时可见 /opt/ros 的 rclpy 与这里装的 wuji-sdk。
-#   wuji-sdk：2026.7.21/8.3 起 retargeting 原生化，顶层 from wuji_sdk import
-#             HandModel, RetargetSession，无需 [retarget] extra。
-RUN pip install --no-cache-dir --break-system-packages \
-        wuji-sdk \
-        numpy \
-        ruckig \
-        mujoco imageio imageio-ffmpeg opencv-python
+# Python 依赖：**只装 wuji-sdk**。装进系统 Python 3.12（容器内 --break-system-packages 绕过
+# PEP668）；源 setup.bash 后 python3 同时可见 /opt/ros 的 rclpy 与 wuji-sdk。
+#   - wuji-sdk 2026.8.3 起 retargeting 原生化，顶层 from wuji_sdk import HandModel,
+#     RetargetSession，无需 [retarget] extra；且无 numpy 硬依赖，沿用 ROS2 的 numpy 1.26。
+#   - ⚠️ 不在本镜像装 mujoco/opencv：它们要 numpy>=2，会顶掉 ROS2 依赖的 numpy 1.26 并破坏
+#     rclpy/消息的 numpy 转换。MuJoCo 仿真预览（glove_teleop_live.py 等）请另建**独立
+#     non-ROS venv**（见仓库「环境」小节），与本 ROS2 驱动镜像分开跑。
+RUN pip install --no-cache-dir --break-system-packages wuji-sdk
 
 # 放入仓库代码（也可在 run 时用 -v $PWD:/ws 覆盖为本地开发目录）
 WORKDIR /ws

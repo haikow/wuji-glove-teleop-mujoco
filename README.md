@@ -48,6 +48,11 @@ python3 ros2_realhand_node.py --side right --hand-sn <二代手SN> --prefix "" -
 ```
 
 > 想要 LTS 支持周期更长，可把基础镜像换成 `ros:jazzy-ros-base`（同为 24.04 / Python 3.12），节点代码不变。
+>
+> ⚠️ 该镜像**只装 wuji-sdk**（ROS2 驱动栈）。**不含 MuJoCo 仿真**：mujoco/opencv 需要 numpy≥2，会顶掉
+> ROS2 依赖的 numpy 1.26 并破坏 rclpy。MuJoCo 仿真预览（`glove_teleop_live.py` 等）请用上面「环境」小节的
+> **独立 non-ROS venv** 跑，与本 ROS2 驱动镜像分开。已验证：镜像内 `import rclpy, wuji_sdk, sensor_msgs`
+> 同进程通、`ros2_realhand_node` 导入 OK（numpy 1.26.4 / wuji_sdk 2026.8.3 / Python 3.12.3）。
 
 ## 用法
 
