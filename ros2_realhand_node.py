@@ -27,6 +27,7 @@ import sys
 import time
 
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import JointState
@@ -165,13 +166,15 @@ def main():
     try:
         node = RealHandNode(args)
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
+        # rclpy 在 SIGINT 时抛 ExternalShutdownException（不是 KeyboardInterrupt）
         pass
     finally:
         if node is not None:
             node.shutdown()
             node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":
