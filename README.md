@@ -118,20 +118,30 @@ source /opt/ros/<distro>/setup.bash
 二代手（Wuji Hand 2）**目前没有官方 ROS2 包**（`wuji-ros2` 仍在设计阶段；`wujihandros2` 只支持一代手），
 所以用一个很薄的 rclpy 节点把“非 ROS2 的手”封装成标准 ROS2 接口——它与仿真 sink 可互换：
 
+> ⚠️ **Python 版本必须与 ROS2 的 rclpy 对齐（易踩坑）**：`rclpy` 是给某个具体 Python 编的
+> （如 Kilted 是 `python3.12`，`/opt/ros/<distro>/lib/python3.12/site-packages/rclpy`）。若系统默认
+> `python3` 已升级到别的版本（比如 3.14），直接 `python ...` 会 `import rclpy` 失败。**用与 rclpy 匹配的
+> `python3.12` 跑**，并把装了 `wuji_sdk` 的环境的 `site-packages` 挂到 `PYTHONPATH`，让同一进程同时拿到
+> `rclpy` 和 `wuji_sdk`。（cp312 = Humble/Kilted 的 ABI，一套 env 通吃。）
+
 ```bash
-# 装 SDK 到 ROS2 的 Python（cp312 = Humble/Kilted 的 ABI，一套 env 通吃）
-pip install wuji-sdk
 source /opt/ros/<distro>/setup.bash
 
+# 让 python3.12 同时看到 ROS 的 rclpy + 你装了 wuji_sdk 的环境
+#   若 wuji_sdk 装在某个 venv 里，把它的 site-packages 加进来：
+export PYTHONPATH="/path/to/venv/lib/python3.12/site-packages:$PYTHONPATH"
+python3.12 -c "import rclpy, wuji_sdk, sensor_msgs.msg; print('env OK')"   # 自检
+
 # ① 计算节点照旧发 /{side}_hand/joint_commands（二代手用 --hand-model wuji_hand_2）
-python ros2_retarget_node.py --side right --source glove --glove-sn <SN> --hand-model wuji_hand_2
+python3.12 ros2_retarget_node.py --side right --source glove --glove-sn <SN> --hand-model wuji_hand_2
 # ② 真机驱动节点：订阅命令 → SDK 驱动真手；同时回发 /{side}_hand/joint_states
-python ros2_realhand_node.py --side right --hand-sn <二代手SN>
+python3.12 ros2_realhand_node.py --side right --hand-sn <二代手SN>
 ```
 
 - 订阅 `/{side}_hand/joint_commands`（`position[20]` 固件序，带 `velocity[20]` 则作 MIT 速度前馈）→
   `hand.joint_command().publish().send([JointCommand(pos, vel, 0), ...])`；回发实测角到 `/{side}_hand/joint_states`。
 - **SDK 只在这个节点里用**，对 ROS2 侧是纯标准接口；首帧从当前实测位置平滑过渡到第一条命令，避免上电猛弹。
+- 已在 **ROS2 Kilted + 真二代手** 上端到端验证：使能 → 订阅命令驱动真手 → 回发 `joint_states` ~100Hz → Ctrl+C 干净 disable。
 
 ### 接 ROS2 机械臂一起遥操
 
