@@ -31,6 +31,24 @@ python3.12 -m venv --system-site-packages venv312
 
 仅 Linux x86_64/aarch64（retargeting 编译扩展不支持 macOS/Windows）。
 
+### Docker（ROS2 部署推荐，含二代手以太网驱动栈）
+
+`wuji-hand-teleop` 的镜像是 **Ubuntu 22.04 / ROS2 Humble / Python 3.10**，与本仓的 ROS2 二代手
+驱动（`wuji-sdk` cp312 + rclpy）不兼容——不能只改三个版本号：pip 依赖要按 py3.12 重装、24.04 的
+PEP668 要处理、连以太网手要 `--network host`。本仓 [`docker/Dockerfile`](docker/Dockerfile) 已把
+验证过的环境固化为 **Ubuntu 24.04 / ROS2 Kilted / Python 3.12**（三者天然配套）：
+
+```bash
+docker build -t wuji-teleop:kilted -f docker/Dockerfile .
+# 必须 --network host：二代手走以太网(zenoh/UDP)发现 + DDS 都需要主机网络；USB 手套/一代手再加 --device /dev/bus/usb
+docker run --rm -it --network host wuji-teleop:kilted
+# 容器内：
+source /opt/ros/kilted/setup.bash
+python3 ros2_realhand_node.py --side right --hand-sn <二代手SN> --prefix "" --diagnostics
+```
+
+> 想要 LTS 支持周期更长，可把基础镜像换成 `ros:jazzy-ros-base`（同为 24.04 / Python 3.12），节点代码不变。
+
 ## 用法
 
 ### 实时手套遥操（看效果）
