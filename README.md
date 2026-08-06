@@ -143,6 +143,26 @@ python3.12 ros2_realhand_node.py --side right --hand-sn <二代手SN>
 - **SDK 只在这个节点里用**，对 ROS2 侧是纯标准接口；首帧从当前实测位置平滑过渡到第一条命令，避免上电猛弹。
 - 已在 **ROS2 Kilted + 真二代手** 上端到端验证：使能 → 订阅命令驱动真手 → 回发 `joint_states` ~100Hz → Ctrl+C 干净 disable。
 
+#### 作为 `wujihandros2` 的二代手（以太网）即插替换
+
+官方 `wujihandros2` 驱动是 `wujihandcpp::device::Hand(serial)` = **USB / 一代手**，**没有 UDP/以太网**，
+连不了走以太网（zenoh/UDP）的二代手。本节点用 `wuji_sdk`（scan/connect 走以太网）补上这块，且**沿用
+wujihandros2 的话题契约**（`joint_commands`/`joint_states` 均 `sensor_msgs/JointState`，可选
+`hand_diagnostics` = `wujihand_msgs/HandDiagnostics`），所以能直接顶替：
+
+```bash
+# wujihandros2 单手默认（相对名）——用 --prefix "" 对齐
+python3.12 ros2_realhand_node.py --side right --hand-sn <SN> --prefix "" --diagnostics
+# wujihandros2 多手（按手性绝对名 /hand_<side>/）
+python3.12 ros2_realhand_node.py --side right --hand-sn <SN> --prefix "/hand_right/" --diagnostics
+```
+
+- `--prefix` 对齐话题命名（默认 `/{side}_hand/`）；也可用 ROS2 remap `--ros-args -r`。
+- `--diagnostics` 发 `hand_diagnostics`（`wujihand_msgs/HandDiagnostics`：温度/电压/error_code/enabled/
+  effort_limit），供 Monitor GUI 消费；该消息包在 `wuji-hand-teleop`/`wujihandros2` 环境里已有，缺失则自动跳过。
+- 二代手诊断字段映射自 `joint_diagnostics`（`mcu_temp_c_fb`→温度、`vbus_v_fb`→电压、`error_code_current`）。
+- 已真机验证：`hand_diagnostics` 输出 `system_temperature≈65℃ / input_voltage≈12.4V` 等真实值。
+
 ### 接 ROS2 机械臂一起遥操
 
 手（SDK-only）+ 臂（ROS2）联动的推荐结构：计算节点除了发手命令，再把手套腕部 6DoF 位姿
