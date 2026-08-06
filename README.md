@@ -33,30 +33,44 @@ python3.12 -m venv --system-site-packages venv312
 
 ### Docker（ROS2 部署推荐，含二代手以太网驱动栈）
 
-`wuji-hand-teleop` 的镜像是 **Ubuntu 22.04 / ROS2 Humble / Python 3.10**，与本仓的 ROS2 二代手
-驱动（`wuji-sdk` cp312 + rclpy）不兼容——不能只改三个版本号：pip 依赖要按 py3.12 重装、24.04 的
-PEP668 要处理、连以太网手要 `--network host`。本仓 [`docker/Dockerfile`](docker/Dockerfile) 已把
-验证过的环境固化为 **Ubuntu 24.04 / ROS2 Kilted / Python 3.12**（三者天然配套）：
+**核心规则：`rclpy` 必须与 Python 版本严格匹配**，所以看 ROS2 发行版而不是随便配 Python：
+Humble=Python 3.10、Kilted/Jazzy=Python 3.12。`wuji-sdk` 提供 **cp310–cp314** wheel（`manylinux_2_34`，
+glibc≥2.34，22.04/24.04 都满足），所以**两条路都成立，二选一**：
+
+| 选项 | 栈 | Dockerfile | 何时选 |
+|---|---|---|---|
+| **A（最省事）** | Ubuntu 22.04 / Humble / **Python 3.10** | [`docker/Dockerfile.humble`](docker/Dockerfile.humble) | 已在用 `wuji-hand-teleop`（22.04/Humble）→ **不用升级**，加 `pip install wuji-sdk`(cp310) 即可 |
+| **B（新栈）** | Ubuntu 24.04 / Kilted(或 Jazzy) / **Python 3.12** | [`docker/Dockerfile`](docker/Dockerfile) | 新部署 / 想用较新 ROS2 |
+
+> ⚠️ **不要做「Ubuntu 22.04 + Python 3.12」**：Humble 的 rclpy 是给 3.10 编的，22.04 上没有 3.12 的预编译
+> ROS2（Kilted/Jazzy 才是 3.12，但基于 24.04），硬上得在 22.04 源码重编整个 ROS2，不值当。要 3.12 就整套上 24.04（选项 B）。
 
 ```bash
+# 选项 A（Humble/22.04/3.10，留在现有 base，最省事）
+docker build -t wuji-teleop:humble -f docker/Dockerfile.humble .
+docker run --rm -it --network host wuji-teleop:humble
+#   source /opt/ros/humble/setup.bash
+
+# 选项 B（Kilted/24.04/3.12）
 docker build -t wuji-teleop:kilted -f docker/Dockerfile .
-# 必须 --network host：二代手走以太网(zenoh/UDP)发现 + DDS 都需要主机网络；USB 手套/一代手再加 --device /dev/bus/usb
 docker run --rm -it --network host wuji-teleop:kilted
-# 容器内：
-source /opt/ros/kilted/setup.bash
+#   source /opt/ros/kilted/setup.bash
+
+# 两者容器内跑法相同（--network host：二代手以太网 zenoh/UDP 发现 + DDS；USB 手套/一代手再加 --device /dev/bus/usb）：
 python3 ros2_realhand_node.py --side right --hand-sn <二代手SN> --prefix "" --diagnostics
 ```
 
-> 想要 LTS 支持周期更长，可把基础镜像换成 `ros:jazzy-ros-base`（同为 24.04 / Python 3.12），节点代码不变。
+> 选项 B 想要 LTS 支持周期更长，可把基础镜像换成 `ros:jazzy-ros-base`（同为 24.04 / Python 3.12），节点代码不变。
 >
-> ⚠️ 该镜像**只装 wuji-sdk**（ROS2 驱动栈）。**不含 MuJoCo 仿真**：mujoco/opencv 需要 numpy≥2，会顶掉
-> ROS2 依赖的 numpy 1.26 并破坏 rclpy。MuJoCo 仿真预览（`glove_teleop_live.py` 等）请用上面「环境」小节的
-> **独立 non-ROS venv** 跑，与本 ROS2 驱动镜像分开。
+> ⚠️ 两个镜像都**只装 wuji-sdk**（ROS2 驱动栈）。**不含 MuJoCo 仿真**：mujoco/opencv 需要 numpy≥2，会顶掉
+> ROS2 依赖的 numpy（Humble 1.21 / Kilted 1.26）并破坏 rclpy。MuJoCo 仿真预览（`glove_teleop_live.py` 等）
+> 请用上面「环境」小节的 **独立 non-ROS venv** 跑，与本 ROS2 驱动镜像分开。
 >
-> **已实测（build → 容器内真机驱动全程）**：`sudo docker build` exit 0，镜像 1.38GB；容器内
-> `import rclpy + wuji_sdk + sensor_msgs` 同进程通；`docker run --network host` 下 `ros2_realhand_node.py`
-> 连以太网二代手（WH2JA…@192.168.1.110:7447）→ 使能 → 订阅 `joint_commands` 驱动真手 → 回发
-> `joint_states` **~100Hz** → 首帧平滑过渡（numpy 1.26.4 / wuji_sdk 2026.8.3 / Python 3.12.3）。
+> **两镜像均已实测（build → 容器内 `--network host` 真机驱动全程）**，连以太网二代手
+> （WH2JA…@192.168.1.110:7447）→ 使能 → 订阅 `joint_commands` 驱动真手 → 回发 `joint_states` **~100Hz**
+> → 首帧平滑过渡：
+> - **A · Humble**：镜像 1.21GB，Python 3.10.12 / wuji_sdk 2026.8.3 / numpy 1.21.5
+> - **B · Kilted**：镜像 1.38GB，Python 3.12.3 / wuji_sdk 2026.8.3 / numpy 1.26.4
 
 ## 用法
 

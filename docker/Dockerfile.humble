@@ -1,0 +1,43 @@
+# wuji-glove-teleop-mujoco 运行环境 —— Humble 版（留在 22.04，最省事）
+#
+# 适合已在用 wuji-hand-teleop 镜像（Ubuntu 22.04 / ROS2 Humble / Python 3.10）的客户：
+# 无需升级系统/ROS/Python —— wuji-sdk 提供 cp310 wheel（manylinux_2_34，22.04 的
+# glibc 2.35 满足），直接 pip install 即可与 Humble 的 rclpy（同为 Python 3.10）配套。
+#
+# ⚠️ 不要做「22.04 + Python 3.12」：Humble 的 rclpy 是给 3.10 编的，22.04 上没有 3.12 的
+# 预编译 ROS2（Kilted/Jazzy 才是 3.12，但基于 24.04）；硬上 3.12 得在 22.04 源码重编 ROS2。
+# 要 Python 3.12 就整套上 24.04（见 docker/Dockerfile，Kilted）。
+#
+# 构建：  docker build -t wuji-teleop:humble -f docker/Dockerfile.humble .
+# 运行：  docker run --rm -it --network host wuji-teleop:humble
+#         └─ 必须 --network host：二代手走以太网(zenoh/UDP)发现 + DDS 都需要主机网络。
+#         带 USB 手套/一代手再加：  --device /dev/bus/usb
+FROM ros:humble-ros-base
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+# 系统依赖：python3-pip（装 wuji-sdk）、libusb（wuji-sdk USB transport）、消息包（ros-base 通常已含）
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3-pip git git-lfs \
+        libusb-1.0-0 \
+        ros-humble-sensor-msgs ros-humble-geometry-msgs \
+    && rm -rf /var/lib/apt/lists/*
+
+# 只装 wuji-sdk（cp310）。22.04 的 pip 早于 PEP668，无需 --break-system-packages。
+#   wuji-sdk 2026.8.3 retargeting 原生化（顶层 from wuji_sdk import HandModel,
+#   RetargetSession），无 numpy 硬依赖 → 沿用 Humble 的 numpy 1.21，不破坏 rclpy。
+#   ⚠️ 同样不装 mujoco/opencv（要 numpy≥2，会破坏 ROS2）；MuJoCo 仿真另开独立 non-ROS venv。
+RUN pip install --no-cache-dir wuji-sdk
+
+WORKDIR /ws
+COPY . /ws
+
+RUN echo 'source /opt/ros/humble/setup.bash' >> /etc/bash.bashrc \
+    && echo 'echo -n "env check: "; python3 -c "import rclpy, wuji_sdk, sensor_msgs.msg; print(\"rclpy + wuji_sdk + sensor_msgs OK (py\"+__import__(\"sys\").version.split()[0]+\")\")"' >> /etc/bash.bashrc
+
+SHELL ["/bin/bash", "-lc"]
+
+# 跑二代手以太网驱动节点：
+#   source /opt/ros/humble/setup.bash
+#   python3 ros2_realhand_node.py --side right --hand-sn <SN> --prefix "" --diagnostics
+CMD ["bash"]
