@@ -51,8 +51,12 @@ python3 ros2_realhand_node.py --side right --hand-sn <二代手SN> --prefix "" -
 >
 > ⚠️ 该镜像**只装 wuji-sdk**（ROS2 驱动栈）。**不含 MuJoCo 仿真**：mujoco/opencv 需要 numpy≥2，会顶掉
 > ROS2 依赖的 numpy 1.26 并破坏 rclpy。MuJoCo 仿真预览（`glove_teleop_live.py` 等）请用上面「环境」小节的
-> **独立 non-ROS venv** 跑，与本 ROS2 驱动镜像分开。已验证：镜像内 `import rclpy, wuji_sdk, sensor_msgs`
-> 同进程通、`ros2_realhand_node` 导入 OK（numpy 1.26.4 / wuji_sdk 2026.8.3 / Python 3.12.3）。
+> **独立 non-ROS venv** 跑，与本 ROS2 驱动镜像分开。
+>
+> **已实测（build → 容器内真机驱动全程）**：`sudo docker build` exit 0，镜像 1.38GB；容器内
+> `import rclpy + wuji_sdk + sensor_msgs` 同进程通；`docker run --network host` 下 `ros2_realhand_node.py`
+> 连以太网二代手（WH2JA…@192.168.1.110:7447）→ 使能 → 订阅 `joint_commands` 驱动真手 → 回发
+> `joint_states` **~100Hz** → 首帧平滑过渡（numpy 1.26.4 / wuji_sdk 2026.8.3 / Python 3.12.3）。
 
 ## 用法
 
