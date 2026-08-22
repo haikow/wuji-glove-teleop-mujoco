@@ -236,8 +236,8 @@ class McapJoinTest(unittest.TestCase):
         """--rerun 落 .rrd，且骨架/指令/实测/误差通道都在。"""
         try:
             import rerun  # noqa: F401
-        except ImportError:
-            self.skipTest("需要 rerun-sdk")
+        except Exception as e:
+            self.skipTest("需要 rerun-sdk（%s）" % type(e).__name__)
         from tools.episode_format import load_frames
         from tools.viz_episode import log_rerun
         self._build(n=60, hand_lag=2)
@@ -252,8 +252,10 @@ class McapJoinTest(unittest.TestCase):
         try:
             import rerun  # noqa: F401
             import mujoco  # noqa: F401
-        except ImportError:
-            self.skipTest("需要 rerun-sdk + mujoco")
+        except Exception as e:
+            # 无头机器上 mujoco 会在 import 期直接抛 AttributeError（找不到 EGL），
+            # 不是 ImportError，所以这里必须接 Exception 才能优雅跳过。
+            self.skipTest("需要 rerun-sdk + mujoco（%s）" % type(e).__name__)
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         mjcf = os.path.join(root, "wuji_hand_description", "mjcf", "right.xml")
         if not os.path.isfile(mjcf):
@@ -279,8 +281,8 @@ class McapJoinTest(unittest.TestCase):
         """SDK 录的裸 MCAP（无 episode 目录、无 action）也要能直接渲染。"""
         try:
             import rerun  # noqa: F401
-        except ImportError:
-            self.skipTest("需要 rerun-sdk")
+        except Exception as e:
+            self.skipTest("需要 rerun-sdk（%s）" % type(e).__name__)
         from tools.viz_mcap import read_mcap
         mcap_path = os.path.join(self.ep, "obs.mcap")
         write_obs_mcap(mcap_path, list(range(1000, 1060)), hand_lag=1)
@@ -323,8 +325,8 @@ class McapJoinTest(unittest.TestCase):
         """纯仿真 episode（没有真机反馈）也要能导出，不能因为缺 hand_state 崩。"""
         try:
             import rerun  # noqa: F401
-        except ImportError:
-            self.skipTest("需要 rerun-sdk")
+        except Exception as e:
+            self.skipTest("需要 rerun-sdk（%s）" % type(e).__name__)
         from tools.episode_format import load_frames
         from tools.viz_episode import log_rerun
         self._build(n=40)
