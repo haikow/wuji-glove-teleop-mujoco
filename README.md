@@ -139,18 +139,9 @@ MUJOCO_GL=egl ./venv312/bin/python glove_teleop_live.py --side left --show-input
 ./venv312/bin/python record_glove_data.py --glove-sn <手套SN> --seconds 20 --out rec
 ```
 
-### 无手套：录制数据回放
+> 这条路径**只有 obs、没有 action**，适合看原始信号，不适合做模仿学习数据集。
+> 要训练数据请走下面的数据飞轮（`record_episode.py`）。
 
-```bash
-MUJOCO_GL=egl ./venv312/bin/python mujoco_teleop_replay.py --mode video --out teleop.mp4 --frames 900
-```
-
-### ROS2 两节点管线（retarget 发 topic → MuJoCo 订阅）
-
-```bash
-source /opt/ros/<distro>/setup.bash
-./run_ros2_teleop.sh view      # 或 video
-```
 计算节点发 `/{side}_hand/joint_commands`（`sensor_msgs/JointState`，position[20]，固件关节序）；
 换真机时把 MuJoCo 订阅端（`ros2_mujoco_hand_node.py`）替换成真机驱动节点即可，计算节点不动。
 
@@ -210,6 +201,241 @@ python3.12 ros2_realhand_node.py --side right --hand-sn <SN> --prefix "/hand_rig
 （`emf_poses`/`tf`）发成臂的目标位姿（`geometry_msgs/PoseStamped` 或 TF）→ 喂 **MoveIt Servo** /
 笛卡尔控制器让臂跟随；手仍走上面的 `ros2_realhand_node.py`。连续遥操时手套流本身平滑、MIT 直接跟即可，
 无需额外插补；只有下发**离散预设动作**才需要 Ruckig / 梯形加减速做轨迹。
+
+## 数据飞轮（data flywheel）
+
+```
+采集 → episode 目录 → 自动质检 → 分流 clean/rejected → 导出 LeRobot → 训 BC 验证 → 再采集
+```
+
+一键跑完质检到导出（采集要人戴手套，不在脚本里）：
+
+```bash
+tools/flywheel_once.sh                 # 质检 → 分流 → 导出 → 读回自检
+tools/flywheel_once.sh --task pick_cube
+SKIP_EXPORT=1 tools/flywheel_once.sh   # 只质检
+```
+
+### 0. 依赖分层
+
+采集和质检只要 `requirements.txt`（轻量）；导出 LeRobot 数据集和训 BC 才需要
+`requirements-training.txt`（会拉 torch + CUDA，约 4GB）：
+
+```bash
+./venv312/bin/pip install -r requirements.txt              # 采集 + 质检
+./venv312/bin/pip install -r requirements-training.txt     # 再加导出 + 训练
+```
+
+### 1. 先标定，否则 retarget 一定对不准
+
+**默认 SDK 用户永远回落内置 URDF、忽略标定** —— 实测判据：
+
+```
+默认用户        urdf_source=builtin_default   path=None
+jues_20260822  urdf_source=calibration_file  path=.../users/u_xxx/models/...urdf
+```
+
+所以标定必须落到**具名用户**下，遥操时再用 `--user` 切回去：
+
+```bash
+# 交互式，6 个姿势：4 个捏合 + 四指弯 90° + 摊平张开
+./venv312/bin/python tools/calibrate_glove.py --glove-sn <手套SN> \
+    --user-name <你的用户名> --hand-profile wujihand2
+```
+
+`--hand-profile` 要和真机手对齐：`wujihand`=一代，`wujihand2`=二代（SN 以 `WH2` 开头、
+SDK 类型 `WujiHand2`）。`both` 则两套都生成。
+
+> ⚠️ **`hand_model_path()` 不能当"当前用了哪套模型"的判据** —— 它是*覆盖槽*
+> （"Custom hand URDF path accessor"），没设 override 时直接抛
+> `Path not found: calibration.hand_model_path`。硬证据是
+> `WujiGlove.offline_pipeline(sn, side).urdf_source`，取值
+> `builtin_default` / `calibration_file` / `override`。录制器会把它写进 `meta.json`。
+
+### 2. 二代手要换 MJCF
+
+本仓库只 vendor 了一代 `wuji_hand_description/`。用 `--hand-model wuji_hand_2` 时，
+retarget 输出落在**二代**关节限位内，拿一代 MJCF 去 clip 会错得很离谱 —— 实测
+**63.7% 的帧越界、最大 0.53 rad（30°）**：
+
+```
+一代(本仓库)   越界最大=0.5262 rad  越界帧占比=63.7%
+hand2_beta1   越界最大=0.0000 rad  越界帧占比=0.0%
+hand2_beta2   越界最大=0.0000 rad  越界帧占比=0.0%
+```
+
+（beta1/beta2 的 20 个关节限位完全一致，只差几何，脚本取较新的 beta2。）
+
+```bash
+tools/fetch_hand2_description.sh    # → wuji_hand_description2/（约 18MB，不入库）
+```
+
+拉下来后 `--hand-model wuji_hand_2` 会自动用它；没拉则回落一代并打印告警。
+
+### 3. 采集：episode 化录制
+
+```bash
+# 录 5 条 10 秒 demo，每条录完提示打 success 标签
+./venv312/bin/python record_episode.py --glove-sn <手套SN> --task pick_cube \
+    --user <标定过的用户名> --hand-model wuji_hand_2 \
+    --seconds 10 --episodes 5 --label
+
+# 带真机手：使能 + 下发 joint_command + 把 joint_states 一起录进 MCAP
+./venv312/bin/python record_episode.py --glove-sn <手套SN> --hand-sn <手SN> \
+    --user <标定过的用户名> --hand-model wuji_hand_2 --task pick_cube
+#   --no-enable 只录反馈不驱动；录制中输入 i + 回车标记一段人工介入；
+#   退出时自动 disable。
+
+# 顺带出 preview.mp4，方便事后人工过一遍
+MUJOCO_GL=egl ./venv312/bin/python record_episode.py --glove-sn <手套SN> \
+    --task pick_cube --video
+```
+
+产出（每条 episode 一个自包含目录）：
+
+```text
+data/episodes/ep_<YYYYMMDD_HHMMSS>_<side>/
+    meta.json       # 身份/环境/标签
+    obs.mcap        # SDK TopicRecorder 录的 obs（LZ4，Foxglove 可开）
+    action.jsonl    # retarget action 旁路，按 header.seq 与 MCAP 对齐
+    preview.mp4     # --video 时
+    quality.json    # 质检后写入
+```
+
+### 4. 容器为什么是 MCAP + 旁路
+
+**obs 走 `wuji_sdk.TopicRecorder`**：这是这套栈的 house format —— LZ4 压缩、自描述
+jsonschema、Foxglove 直接打开，还自带 `QualityMetrics`（丢帧率/抖动/跨通道同步率）和
+阈值告警，没必要自己再造一个 JSONL。
+
+**action 只能走旁路**：`TopicRecorder.record()` 的入参是 `Subscription`（设备话题），
+而 retarget action 是 host 侧算出来的、没有对应的设备资源路径（`publish()` 是往设备发、
+路径必须已存在），**存不进那个 MCAP**。所以单独落 `action.jsonl`。
+
+**join 键是 `hand_skeleton.header.seq`**，不是时间戳。实测依据：
+
+- 同一资源开两个订阅（一个给录制器、一个给 retarget 回路）看到的 seq 完全一致（361/361）
+- `hand_skeleton` 与 `hand_joint_angles` 共用同一 seq 空间、时间戳 diff = 0µs
+
+所以 join 是精确的。读回时 `tools/episode_format.iter_frames()` 把两个容器合成统一帧结构，
+下游看到的东西和自包含 JSONL 版本完全一样（老的 `frames.jsonl` episode 仍然能读）。
+
+其余三个设计要点：
+
+- **开录前预热（`--warmup-frames`，默认 60）**：真机实测，不预热每条 episode 开头都有一个
+  0.24~0.33s 的假 gap，被 QC 判 `gap`+`dropout`。成因有两个，都要治：订阅后数据流本身有
+  一段不稳定期；**首次 `sess.step()` / 首次 render 是冷路径**，处理第一帧吃掉 ~0.24s，
+  期间设备又产了约 29 帧，于是头两帧的设备时间戳凭空拉开。预热同时空转 drain 和跑
+  `sess.step()`，正式录制就是纯 8.3ms（120Hz）稳态。另外 `recorder.start()` 之后要再丢一帧
+  —— 那帧是 start 之前就躺在队列里的，obs 没进 MCAP，会变成 join 不上的孤儿 action。
+- **join 覆盖率不是 100%**：retarget 回路用"取最新帧"主动跳过积压以免累积延迟，实测覆盖
+  98.1%~98.4%。低于 `min_action_join_ratio`（默认 0.9）判 fail，不允许悄悄导出半份数据。
+- **action 不做本地 clip**：retarget 已经在目标手型自己的 URDF 限位内解算，输出直接下发；
+  MJCF clip 只用于 MuJoCo 显示。`action_raw_max_ovr` 记录超出本地 MJCF 多少 ——
+  它非零就说明 MJCF 和手型不匹配（QC 打 `action_clipped` 警告）。
+- **meta 记标定身份**：retarget 输出强依赖加载了哪套手 URDF。`meta.json` 存 `user_id` /
+  `calibrated` / `urdf_source` + `urdf_source_path`（**硬证据，导出按它分组**）/ `mjcf` /
+  `sdk_version` / `sdk_quality` / `hand`（真机 SN、在线关节数、是否使能）。
+
+### 真机手跟踪误差
+
+给了 `--hand-sn` 后，`joint_states`（~999Hz）也进同一个 MCAP，读回时按时间戳并到帧上。
+QC 会把**滞后**和**跟不动**分开：扫描 0~200ms 的滞后取误差最小值，最优滞后本身就是
+端到端延迟估计。实测（标定 + 二代模型 + 二代 MJCF）：
+
+```
+track_mae(零滞后)=0.036~0.040   track_mae(扣滞后)=0.0161~0.0178 rad (0.92~1.02°)
+最优滞后=4 帧/33ms              clip_max=0.0
+```
+
+对照组（默认用户 + 一代模型 + 一代 MJCF）：扣滞后 0.0241~0.0409 rad（1.38~2.35°），
+滞后 42ms，clip_max 0.47~0.53 rad。**标定 + 正确手型让跟踪误差差不多减半。**
+BC baseline 的验证误差也从 2.62° 降到 1.64°。
+
+### 5. 质检：自动打分 + 分流
+
+```bash
+python tools/qc_episode.py data/episodes                # 只写 quality.json
+python tools/qc_episode.py data/episodes --route link   # 顺便分流 clean/rejected
+python tools/qc_episode.py data/episodes --set min_rate_hz=30 --strict
+python tools/qc_episode.py data/episodes --print-thresholds
+```
+
+判 **fail** 的 flag：`too_short` / `too_long` / `low_rate` / `gap` / `dropout`（按 seq 跳号）/
+`duplicate_seq` / `action_jump` / `near_static` / `nonfinite` / `no_action` /
+`low_action_join` / `empty`。仅记录不拦截的 **warning**：`low_confidence` /
+`action_clipped`（顶到限位）/ `tactile_dead` / `tactile_saturated` / `clock_backwards` /
+`host_clock_only` / `no_device_seq`。SDK 自己算的 `drop_rate`/`sync_rate` 会原样带进
+`quality.json` 的 `metrics.sdk_quality`，可以和我们算的交叉验证。
+
+### 6. 标注
+
+```bash
+python tools/label_episode.py data/episodes --list      # 看标注状态
+python tools/label_episode.py data/episodes --review    # 逐条过（带 QC 摘要 + preview 路径）
+python tools/label_episode.py data/episodes/ep_xxx --success y
+```
+
+### 7. 导出 LeRobot 数据集
+
+LeRobot **本身就是 parquet** —— v3 布局 = `data/chunk-000/*.parquet` +
+`meta/info.json`（schema/fps/path 模板）+ `meta/stats.json`（归一化）+
+`meta/tasks.parquet` + `meta/episodes/`（边界与分片索引）。这套分片索引手写容易错，
+所以直接用官方 `LeRobotDataset.create()/add_frame()/save_episode()` 写，格式由库负责。
+
+```bash
+./venv312/bin/python tools/export_dataset.py --input data/clean \
+    --repo-id local/wuji_pick_cube --out data/datasets/pick_cube
+./venv312/bin/python tools/export_dataset.py --verify data/datasets/pick_cube \
+    --repo-id local/wuji_pick_cube
+```
+
+- `observation.state` = skeleton(63) + joint_angles，`--obs skeleton|joints|both`
+- `action` = 20 维 retarget 目标关节角
+- 额外存一列 `observation.timestamp_dev`：LeRobot 按 `frame_index/fps` 生成均匀
+  timestamp，而我们的帧列有约 2% 空洞，把设备时钟原样留一列，事后能查真实间隔
+- 另写 `wuji_provenance.json`：哪些 episode、什么手模型、什么 SDK 版本进了这个数据集
+- **溯源分组守卫**：默认按 `(task, side, hand_model_path, action_dim, obs_dim)` 分组，
+  发现多于一组直接报错退出（返回码 2），要混必须显式 `--allow-mixed`
+
+### 8. 消费端：BC baseline
+
+这不是要做 SOTA 策略，而是**唯一能证明导出的数据真能被训练栈吃进去**的手段 ——
+QC 全绿只说明数据自洽，不说明格式对。
+
+```bash
+./venv312/bin/python tools/train_bc.py --dataset data/datasets/pick_cube \
+    --repo-id local/wuji_pick_cube --epochs 20 --out data/models/bc.pt
+
+# 把预测的 action 放回 MuJoCo，肉眼看手动得对不对
+MUJOCO_GL=egl ./venv312/bin/python tools/viz_episode.py data/episodes/ep_xxx \
+    --policy data/models/bc.pt
+```
+
+验证集按 **episode** 切，不按帧切 —— 同一条 demo 的相邻帧几乎一样，帧级切分会让验证集
+泄漏训练集内容，误差看起来好得离谱。
+
+### 9. 回看
+
+```bash
+MUJOCO_GL=egl ./venv312/bin/python tools/viz_episode.py data/episodes/ep_xxx
+MUJOCO_GL=egl ./venv312/bin/python tools/viz_episode.py data/episodes/ep_xxx \
+    --policy data/models/bc.pt --out policy.mp4     # 策略回放 + 逐关节误差
+./venv312/bin/python tools/viz_episode.py data/episodes/ep_xxx --stats-only
+```
+
+### 10. 无硬件自测
+
+```bash
+python3 tools/synth_episode.py --out /tmp/fw/episodes --defect all   # 12 条带缺陷样本
+python3 tools/qc_episode.py /tmp/fw/episodes
+
+python3 tests/test_qc_episode.py                       # QC 规则（纯标准库）
+./venv312/bin/python tests/test_mcap_join.py           # MCAP join + 真机跟踪误差/滞后
+./venv312/bin/python tests/test_record_dedup.py        # 录制回路去重/对齐/预热
+./venv312/bin/python tests/test_export_label.py        # 导出筛选/分组守卫/标注/手型解析
+```
+
 
 ## 实现要点 / 踩过的坑
 

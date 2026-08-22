@@ -6,3 +6,7 @@ __pycache__/
 *.png
 *.jpg
 *.log
+# 采集数据（episode 目录、体积大）
+data/
+# 二代手模型（tools/fetch_hand2_description.sh 拉取，不入库）
+wuji_hand_description2/

@@ -12,6 +12,7 @@
 """
 import argparse
 import os
+import sys
 import time
 
 import numpy as np
@@ -322,6 +323,9 @@ def main():
                 print(f"[warn] restore user failed: {e}")
         print(f"done: {frames} frames, avg {frames/max(time.time()-t0,1e-3):.1f} fps"
               + (f", saved {args.record}" if args.record else ""))
+        # os._exit 跳过解释器清理（SDK 后台线程退不干净会挂住），但也跳过 stdout flush，
+        # 不手动 flush 会吞掉上面这行。
+        sys.stdout.flush()
         os._exit(0)
 
 

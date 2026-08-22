@@ -1,0 +1,4 @@
+# 只有"导出 LeRobot 数据集 / 训 BC baseline"才需要，采集+质检不需要。
+# 注意会拉 torch + 整套 CUDA wheel（约 4GB）。
+-r requirements.txt
+lerobot[dataset]==0.6.1
