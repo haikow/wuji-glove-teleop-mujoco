@@ -163,6 +163,68 @@ retarget 回路用"取最新帧"主动跳过积压以免累积延迟，而 MCAP 
 
 ---
 
+## 8. 规模压测：链路能撑多少、瓶颈在哪一段
+
+真机采集受人力限制（一条 10~15s 还要复位），测不出管线的规模边界。用
+`tools/bench_pipeline.py` 合成 **1000 条 × 300 帧 = 30 万帧**压测（16 核 CPU，单进程管线）：
+
+| 阶段 | 耗时 | 吞吐 | 备注 |
+|---|---|---|---|
+| QC | 11.4s | **88 条/s · 26421 帧/s** | 纯标准库单进程，1000/1000 通过 |
+| 导出 LeRobot | 125.5s | **2391 帧/s** | 730 MB JSONL → 179 MB parquet（**0.25×**） |
+| 峰值内存 | — | **998 MB** | 全程单进程，不随 episode 数线性增长 |
+
+⚠️ **小规模测出来的导出速率会严重低估**：5 条 × 200 帧时只有 340 帧/s，因为被
+`save_episode()` 的 per-episode 固定开销主导；到 1000 条时是 2391 帧/s，差 7 倍。
+报吞吐必须说清样本规模。
+
+**复现**：
+
+```bash
+./venv312/bin/python tools/bench_pipeline.py --episodes 1000 --frames 300 \
+    --max-batches 60 --dataloader-workers 0 2 4 8
+```
+
+## 9. dataloader 取样吞吐：调参 6.73×
+
+训练侧真正的瓶颈是取样速度，不是导出速度。在上面那份 30 万帧数据集上扫参：
+
+| num_workers | batch_size | pin_memory | prefetch | samples/s |
+|---|---|---|---|---|
+| 0 | 256 | – | – | 13 059 ← **朴素默认** |
+| 2 | 256 | False | 2 | 23 223 |
+| 4 | 256 | False | 2 | 40 120 |
+| 8 | 256 | False | 2 | 54 027 |
+| 12 | 256 | False | 2 | 70 532 |
+| 12 | 512 | False | 2 | 77 813 |
+| 12 | 1024 | False | 2 | **87 844** ← 最快 |
+| 12 | 1024 | True | 2 | 85 387 |
+| 12 | 1024 | False | 4 | 79 102 |
+
+**13 059 → 87 844 samples/s，6.73×。** 两个反直觉的点：
+
+- `prefetch_factor` 从 2 调到 4 **反而掉 10~25%** —— 预取带来的内存压力盖过了收益。
+- `pin_memory=True` 在纯 CPU 取样下是**负收益**（多一次锁页拷贝，却没有 GPU 传输来摊销）。
+  只有真往 GPU 灌数据时才该开。
+
+也就是说：这套数据规模下 dataloader 不是瓶颈（8.8 万 samples/s 远高于任何策略网络的
+消费速度），**瓶颈在导出段**（2391 帧/s，单进程）。要继续优化应该先并行化导出。
+
+**复现**：
+
+```bash
+./venv312/bin/python tools/bench_pipeline.py --dataset <数据集目录> \
+    --dataloader-workers 0 2 4 8 12 --sweep
+```
+
+## 10. CI 抓到的可移植性问题
+
+无头 runner 上缺 EGL 时，`import mujoco` 会在 **import 期**抛
+`AttributeError: 'NoneType' object has no attribute 'eglQueryString'`，
+**不是 `ImportError`** —— 只接 `ImportError` 的 skip 守卫会漏掉，测试直接变 error。
+修法：守卫接 `Exception`；CI 装 `libegl1/libgl1/libglx-mesa0` 让相关用例真的跑起来
+（skip 数从 4 降到 2）。
+
 ## 容量参考
 
 - `joint_states` ~999Hz 是大头：obs.mcap 约 **0.7 MB/s**，即 **2.5 GB/小时/手**（LZ4 后）

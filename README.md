@@ -496,6 +496,19 @@ rerun data/episodes/ep_xxx/episode.rrd  # 本地打开
   独立成组渲染，**没有对齐到同一世界系**。要接相机做同步渲染，还缺发射器→相机的外参，
   那不在录制数据里，得自己标。
 
+### 9c. 规模压测
+
+真机采集测不出管线边界，用合成数据压：
+
+```bash
+./venv312/bin/python tools/bench_pipeline.py --episodes 1000 --frames 300
+./venv312/bin/python tools/bench_pipeline.py --dataset <数据集> --sweep   # 只调 dataloader
+```
+
+30 万帧实测：QC **26421 帧/s**、导出 **2391 帧/s**（730MB JSONL → 179MB parquet）、
+峰值内存 **998MB**；dataloader 调参后 **13 059 → 87 844 samples/s（6.73×）**。
+瓶颈在导出段而非取样段。详见 [`docs/findings.md`](docs/findings.md) §8–9。
+
 ### 10. 无硬件自测
 
 ```bash

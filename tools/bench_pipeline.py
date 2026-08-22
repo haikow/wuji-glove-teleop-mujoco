@@ -21,7 +21,6 @@ import json
 import os
 import resource
 import shutil
-import statistics
 import sys
 import tempfile
 import time
@@ -114,36 +113,58 @@ def bench_export(input_dir, out, repo_id, obs_mode, fps):
     return total, odim, adim
 
 
-def bench_dataload(root, repo_id, workers_list, batch_size, max_batches):
-    """随机读吞吐 —— 训练时真正的瓶颈指标，比"导出多快"更值钱。"""
-    import torch
+def _one_dataload(ds, w, bs, max_batches, pin, prefetch):
     from torch.utils.data import DataLoader
 
+    kw = {}
+    if w:                                           # prefetch_factor 只在有 worker 时合法
+        kw["prefetch_factor"] = prefetch
+        kw["persistent_workers"] = True
+    dl = DataLoader(ds, batch_size=bs, shuffle=True, num_workers=w,
+                    pin_memory=pin, **kw)
+    it = iter(dl)
+    next(it)                                        # 预热：第一批含 worker 启动开销
+    t0 = time.perf_counter()
+    n = 0
+    for _ in range(max_batches):
+        try:
+            b = next(it)
+        except StopIteration:
+            break
+        n += b["action"].shape[0]
+    dt = time.perf_counter() - t0
+    del it, dl
+    return n, dt
+
+
+def bench_dataload(root, repo_id, workers_list, batch_size, max_batches,
+                   sweep=False, pin=False, prefetch=2):
+    """随机读吞吐 —— 训练时真正的瓶颈指标，比"导出多快"更值钱。
+
+    sweep=True 时额外扫 batch_size × pin_memory，用来找"朴素默认配置"到"调过参"
+    之间的差距（很多人直接用 num_workers=0 的默认值，那是最慢的一档）。
+    """
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
     ds = LeRobotDataset(repo_id=repo_id, root=root)
     out = []
-    for w in workers_list:
-        dl = DataLoader(ds, batch_size=batch_size, shuffle=True, num_workers=w,
-                        persistent_workers=bool(w), pin_memory=False)
-        it = iter(dl)
-        next(it)                                    # 预热：第一批含 worker 启动开销
-        t0 = time.perf_counter()
-        n = 0
-        for _ in range(max_batches):
-            try:
-                b = next(it)
-            except StopIteration:
-                break
-            n += b["action"].shape[0]
-        dt = time.perf_counter() - t0
-        del it, dl
-        out.append({"num_workers": w, "batches": max_batches,
-                    "samples": n, "seconds": round(dt, 3),
-                    "samples_per_s": round(n / dt, 1) if dt > 0 else None})
-        print("    num_workers=%-2d  %8.1f samples/s" % (w, n / dt if dt else 0))
+    combos = [(w, batch_size, pin, prefetch) for w in workers_list]
+    if sweep:
+        best_w = max(workers_list)
+        combos += [(best_w, bs, p, pf)
+                   for bs in (batch_size * 2, batch_size * 4)
+                   for p in (False, True)
+                   for pf in (2, 4)]
+    for w, bs, p, pf in combos:
+        n, dt = _one_dataload(ds, w, bs, max_batches, p, pf)
+        rec = {"num_workers": w, "batch_size": bs, "pin_memory": p,
+               "prefetch_factor": pf if w else None, "samples": n,
+               "seconds": round(dt, 3),
+               "samples_per_s": round(n / dt, 1) if dt > 0 else None}
+        out.append(rec)
+        print("    w=%-2d bs=%-4d pin=%-5s pf=%-4s  %9.1f samples/s"
+              % (w, bs, p, rec["prefetch_factor"], rec["samples_per_s"]))
     del ds
-    torch  # noqa: B018  (保持 import 被使用，便于阅读依赖)
     return out
 
 
@@ -160,10 +181,33 @@ def main():
     ap.add_argument("--skip", nargs="*", default=[],
                     choices=["qc", "export", "dataload"])
     ap.add_argument("--workdir", default="", help="留空用临时目录，跑完删除")
+    ap.add_argument("--dataset", default="",
+                    help="只跑 dataloader 压测：直接吃已有的 LeRobot 数据集目录")
+    ap.add_argument("--sweep", action="store_true",
+                    help="dataloader 额外扫 batch_size × pin_memory × prefetch")
+    ap.add_argument("--repo-id", default="local/bench")
     ap.add_argument("--json-out", default="", help="把结果写成 JSON")
     args = ap.parse_args()
 
     parse_obs_mode(args.obs)                        # 早失败
+
+    if args.dataset:                                # 只测取样吞吐，不重新造数据
+        print("dataloader 压测：%s" % args.dataset)
+        runs = bench_dataload(args.dataset, args.repo_id, args.dataloader_workers,
+                              args.batch_size, args.max_batches, args.sweep)
+        best = max(runs, key=lambda r: r["samples_per_s"] or 0)
+        base = next((r for r in runs if r["num_workers"] == 0), None)
+        print("\n最快：%s" % json.dumps(best, ensure_ascii=False))
+        if base and base["samples_per_s"]:
+            print("相对 num_workers=0 的朴素默认：%.2f×"
+                  % (best["samples_per_s"] / base["samples_per_s"]))
+        if args.json_out:
+            with open(args.json_out, "w") as f:
+                json.dump({"dataload_runs": runs, "best": best}, f,
+                          ensure_ascii=False, indent=2)
+            print("结果 → %s" % args.json_out)
+        return 0
+
     tmp = args.workdir or tempfile.mkdtemp(prefix="bench_")
     eps_dir = os.path.join(tmp, "episodes")
     ds_dir = os.path.join(tmp, "dataset")
@@ -196,7 +240,7 @@ def main():
         if "export" not in args.skip:
             print("[3/4] 导出 LeRobot ...")
             with Stage("export", results) as st:
-                total, odim, adim = bench_export(eps_dir, ds_dir, "local/bench",
+                total, odim, adim = bench_export(eps_dir, ds_dir, args.repo_id,
                                                  args.obs, int(args.hz))
             results["export"].update(frames=total, obs_dim=odim, action_dim=adim,
                                      frames_per_s=round(total / st.dt, 0),
@@ -211,8 +255,8 @@ def main():
             print("[4/4] dataloader 吞吐 ...")
             with Stage("dataload", results):
                 results["dataload_runs"] = bench_dataload(
-                    ds_dir, "local/bench", args.dataloader_workers,
-                    args.batch_size, args.max_batches)
+                    ds_dir, args.repo_id, args.dataloader_workers,
+                    args.batch_size, args.max_batches, args.sweep)
 
         results["peak_rss_mb"] = round(peak_rss_mb(), 1)
         print("\n峰值内存 %.1f MB" % results["peak_rss_mb"])
