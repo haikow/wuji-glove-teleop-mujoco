@@ -78,38 +78,138 @@ SK_CONN = [(0, 1), (1, 2), (2, 3), (3, 4), (0, 5), (5, 6), (6, 7), (7, 8),
            (0, 17), (17, 18), (18, 19), (19, 20), (5, 9), (9, 13), (13, 17)]
 
 
-def log_rerun(ep_dir, frames, out, joint_names=None, pred=None, stride=1):
-    """把 episode 写成 .rrd：3D 手骨架 + 逐关节指令/实测/误差时间序列。
+def _mesh_geoms(m, mujoco):
+    """MJCF 里可见的 mesh geom → [(geom_id, verts, faces)]，顶点是 geom 局部系。
+
+    每个 body 通常有 visual+collision 两个同名 mesh geom，按 mesh id 去重只留一份。
+    用 geom（而不是 body）当实体：MuJoCo 的 d.geom_xpos/xmat 已经是世界位姿，
+    不用再手动复合 body→geom 的偏移。
+    """
+    import numpy as np
+    out, seen = [], set()
+    for g in range(m.ngeom):
+        mid = int(m.geom_dataid[g])
+        if m.geom_type[g] != mujoco.mjtGeom.mjGEOM_MESH or mid < 0 or mid in seen:
+            continue
+        seen.add(mid)
+        v0, nv = int(m.mesh_vertadr[mid]), int(m.mesh_vertnum[mid])
+        f0, nf = int(m.mesh_faceadr[mid]), int(m.mesh_facenum[mid])
+        verts = np.asarray(m.mesh_vert[v0:v0 + nv], np.float32).reshape(-1, 3)
+        faces = np.asarray(m.mesh_face[f0:f0 + nf], np.uint32).reshape(-1, 3)
+        name = mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_MESH, mid) or ("mesh%d" % mid)
+        out.append((g, name, verts, faces))
+    return out
+
+
+def _log_hand_static(rr, root, geoms, color):
+    """静态 log 一次网格；之后每帧只更新 Transform3D，rrd 体积不会随帧数爆。"""
+    for _g, name, verts, faces in geoms:
+        rr.log("%s/%s" % (root, name),
+               rr.Mesh3D(vertex_positions=verts, triangle_indices=faces,
+                         albedo_factor=color),
+               static=True)
+
+
+def _log_hand_pose(rr, root, geoms, m, d, qpos, mujoco, nq):
+    """置关节角 → mj_forward → 把每个 geom 的世界位姿写成 Transform3D。"""
+    import numpy as np
+    d.qpos[:nq] = np.clip(qpos[:nq], m.jnt_range[:nq, 0], m.jnt_range[:nq, 1])
+    mujoco.mj_forward(m, d)
+    for g, name, _v, _f in geoms:
+        rr.log("%s/%s" % (root, name),
+               rr.Transform3D(translation=d.geom_xpos[g],
+                              mat3x3=d.geom_xmat[g].reshape(3, 3)))
+
+
+def _blueprint(rrb, has_actual, has_policy):
+    """3D 视图占主位，曲线收进右侧标签页 —— 否则 80 条标量会把 3D 挤没。"""
+    tabs = [rrb.TimeSeriesView(origin="/action", name="指令 action")]
+    if has_actual:
+        tabs.append(rrb.TimeSeriesView(origin="/track_err", name="跟踪误差"))
+        tabs.append(rrb.TimeSeriesView(origin="/hand_state", name="真机实测"))
+    if has_policy:
+        tabs.append(rrb.TimeSeriesView(origin="/policy", name="策略预测"))
+    return rrb.Blueprint(
+        rrb.Horizontal(
+            rrb.Spatial3DView(origin="/world", name="手 + 手套骨架"),
+            rrb.Tabs(*tabs),
+            column_shares=[3, 2]),
+        collapse_panels=True)
+
+
+def log_rerun(ep_dir, frames, out, joint_names=None, pred=None, stride=1,
+              mjcf=None, meta=None):
+    """把 episode 写成 .rrd。
+
+    3D 视图里有三层，同一坐标系下可直接比对：
+      - `/world/robot_cmd`   指令位姿下的机器人手（**真网格**，不是点云）
+      - `/world/robot_real`  真机 joint_states 实测位姿（有真机数据时）
+      - `/world/glove`       手套 21 点人手骨架（对齐到腕部）
+    加上逐关节 指令/实测/误差/策略 时间序列，外带 blueprint 让 3D 占主视图。
 
     落盘而不是开窗：这台机器常跑无头 EGL。拿到 .rrd 后本地 `rerun <file>.rrd` 打开。
     """
+    import numpy as np
     import rerun as rr
+    import rerun.blueprint as rrb
+
+    meta = meta or {}
+    names = joint_names or ["j%d" % i for i in range(20)]
+    has_actual = any(isinstance(f.get("hand_state"), list) for f in frames)
+    has_policy = pred is not None
 
     rr.init("wuji_episode_%s" % os.path.basename(os.path.normpath(ep_dir)))
-    names = joint_names or ["j%d" % i for i in range(20)]
+    rr.log("/world", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
+
+    geoms = m = d = None
+    if mjcf:
+        import mujoco
+        m = mujoco.MjModel.from_xml_path(mjcf)
+        d = mujoco.MjData(m)
+        geoms = _mesh_geoms(m, mujoco)
+        _log_hand_static(rr, "/world/robot_cmd", geoms, [200, 200, 210, 255])
+        if has_actual:
+            _log_hand_static(rr, "/world/robot_real", geoms, [90, 170, 255, 140])
+        print("  rerun: 机器人手网格 %d 块（%s）" % (len(geoms), os.path.basename(mjcf)))
+
     t0 = frames[0].get("t_dev_us") or 0
     for i, f in enumerate(frames[::stride]):
         k = i * stride
         rr.set_time("t", duration=((f.get("t_dev_us") or t0) - t0) / 1e6)
-        sk = f.get("skeleton")
-        if sk:
-            rr.log("glove/skeleton", rr.Points3D(sk, radii=0.004))
-            rr.log("glove/bones", rr.LineStrips3D([[sk[a], sk[b]] for a, b in SK_CONN],
-                                                  radii=0.0015))
+
         act = f.get("action")
         hs = f.get("hand_state")
+        if geoms is not None:
+            if act:
+                _log_hand_pose(rr, "/world/robot_cmd", geoms, m, d,
+                               np.asarray(act, float), mujoco, m.nq)
+            if has_actual and hs and all(v is not None for v in hs):
+                _log_hand_pose(rr, "/world/robot_real", geoms, m, d,
+                               np.asarray(hs, float), mujoco, m.nq)
+
+        sk = f.get("skeleton")
+        if sk:
+            pts = np.asarray(sk, np.float32)
+            conf = f.get("confidence") or [1.0] * len(pts)
+            # 置信度低的点染红，一眼看出哪根手指跟丢了
+            cols = np.array([[255, 140, 0] if c >= 0.3 else [255, 40, 40]
+                             for c in conf], np.uint8)
+            rr.log("/world/glove/joints", rr.Points3D(pts, radii=0.005, colors=cols))
+            rr.log("/world/glove/bones",
+                   rr.LineStrips3D([[pts[a], pts[b]] for a, b in SK_CONN],
+                                   radii=0.002, colors=[255, 170, 60]))
+
         for j, nm in enumerate(names[:20]):
             if act and j < len(act):
-                rr.log("action/%s" % nm, rr.Scalars(act[j]))
+                rr.log("/action/%s" % nm, rr.Scalars(act[j]))
             if hs and j < len(hs) and hs[j] is not None:
-                rr.log("hand_state/%s" % nm, rr.Scalars(hs[j]))
+                rr.log("/hand_state/%s" % nm, rr.Scalars(hs[j]))
                 if act and j < len(act):
-                    rr.log("track_err/%s" % nm, rr.Scalars(abs(hs[j] - act[j])))
-            if pred is not None and j < pred.shape[1]:
-                rr.log("policy/%s" % nm, rr.Scalars(float(pred[k, j])))
-        if f.get("confidence"):
-            rr.log("glove/conf_min", rr.Scalars(min(f["confidence"])))
-    rr.save(out)
+                    rr.log("/track_err/%s" % nm, rr.Scalars(abs(hs[j] - act[j])))
+            if has_policy and j < pred.shape[1]:
+                rr.log("/policy/%s" % nm, rr.Scalars(float(pred[k, j])))
+
+    rr.save(out, default_blueprint=_blueprint(rrb, has_actual, has_policy))
     return out
 
 
@@ -138,6 +238,10 @@ def main():
     if not frames:
         raise SystemExit("episode 里没有 %s 字段可回放" % args.source)
 
+    # 录制时用的 MJCF 记在 meta 里，回放/rerun 都沿用它，保证限位与几何一致
+    mjcf_path = args.mjcf or meta.get("mjcf") or resolve_mjcf(
+        meta.get("hand_model") or "wuji_hand", side)
+
     recorded = np.asarray([f[args.source] for f in frames], np.float64)
     qpos_seq, label = recorded, "recorded " + args.source
 
@@ -158,7 +262,8 @@ def main():
             out = os.path.splitext(out)[0] + ".rrd"
         jn = (meta.get("action_space") or {}).get("joint_names")
         log_rerun(args.episode, frames, out, jn,
-                  pred if args.policy else None, args.rerun_stride)
+                  pred if args.policy else None, args.rerun_stride,
+                  mjcf=mjcf_path, meta=meta)
         print("rerun → %s（本地打开： rerun %s）" % (out, out))
         return 0
 
@@ -168,10 +273,7 @@ def main():
     import mujoco
     import imageio
 
-    # 录制时用的 MJCF 记在 meta 里，回放优先沿用它，保证限位一致
-    mjcf = args.mjcf or meta.get("mjcf") or resolve_mjcf(
-        meta.get("hand_model") or "wuji_hand", side)
-    m = mujoco.MjModel.from_xml_path(mjcf)
+    m = mujoco.MjModel.from_xml_path(mjcf_path)
     d = mujoco.MjData(m)
     jlo, jhi = m.jnt_range[:, 0].copy(), m.jnt_range[:, 1].copy()
     ren = mujoco.Renderer(m, args.h, args.w)

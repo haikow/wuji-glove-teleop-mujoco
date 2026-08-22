@@ -247,6 +247,34 @@ class McapJoinTest(unittest.TestCase):
         self.assertTrue(os.path.isfile(out))
         self.assertGreater(os.path.getsize(out), 1000)
 
+    def test_rerun_export_with_robot_meshes(self):
+        """给了 MJCF 就要 log 真网格 —— 只有点云看不出手的形态。"""
+        try:
+            import rerun  # noqa: F401
+            import mujoco  # noqa: F401
+        except ImportError:
+            self.skipTest("需要 rerun-sdk + mujoco")
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        mjcf = os.path.join(root, "wuji_hand_description", "mjcf", "right.xml")
+        if not os.path.isfile(mjcf):
+            self.skipTest("缺 MJCF")
+        from tools.episode_format import load_frames
+        from tools.viz_episode import _mesh_geoms
+        import mujoco as mj
+        m = mj.MjModel.from_xml_path(mjcf)
+        geoms = _mesh_geoms(m, mj)
+        self.assertGreater(len(geoms), 5)                 # 每块 link 一份网格
+        for _g, _n, v, f in geoms:
+            self.assertEqual(v.shape[1], 3)
+            self.assertEqual(f.shape[1], 3)
+            self.assertLess(int(f.max()), len(v))          # 面索引不能越界
+        from tools.viz_episode import log_rerun
+        self._build(n=40, hand_lag=2)
+        out = os.path.join(self.tmp, "e3.rrd")
+        log_rerun(self.ep, load_frames(self.ep), out,
+                  ["j%d" % i for i in range(20)], mjcf=mjcf)
+        self.assertGreater(os.path.getsize(out), 100_000)  # 带网格必然远大于纯曲线
+
     def test_rerun_export_without_hand_state(self):
         """纯仿真 episode（没有真机反馈）也要能导出，不能因为缺 hand_state 崩。"""
         try:

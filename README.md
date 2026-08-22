@@ -441,7 +441,18 @@ rerun data/episodes/ep_xxx/episode.rrd  # 本地打开
 ```
 
 `--rerun` 落 `.rrd` 文件而不是开窗 —— 这台机器常跑无头 EGL，落盘后在有显示器的机器上打开。
-一条 15s episode 约 2.9MB / 84 个 entity path。
+
+3D 视图里三层叠在同一坐标系，可直接比对：
+
+| 实体 | 内容 |
+|---|---|
+| `/world/robot_cmd` | 指令位姿下的机器人手，**MJCF 真网格**（二代 26 块 link，不是点云） |
+| `/world/robot_real` | 真机 `joint_states` 实测位姿（半透明蓝，有 `--hand-sn` 数据时才有） |
+| `/world/glove` | 手套 21 点人手骨架，置信度 <0.3 的点染红 |
+
+网格只静态 log 一次，每帧只更新 `Transform3D`，所以 rrd 不随帧数爆（15s 约 9MB）。
+自带 blueprint：3D 占主视图，`action`/`hand_state`/`track_err`/`policy` 四组曲线收进右侧标签页
+—— 否则 80 条标量会把 3D 挤没。
 
 ### 10. 无硬件自测
 
