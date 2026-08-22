@@ -3,6 +3,10 @@
 用 **Wuji Glove → SDK 内置 retargeting → MuJoCo** 实时预览灵巧手遥操效果。
 无手套时可用录制数据回放；也提供一套 ROS2 两节点管线（retarget 节点发 topic → MuJoCo 订阅）。
 
+> 📊 **实测结论与复现方式**见 [`docs/findings.md`](docs/findings.md) —— 每个数字都附测量方法、
+> 数据口径和复现命令（假空档成因、手型-模型不匹配越界率、标定生效判据、
+> 端到端延迟与跟踪误差解耦、数据量对 BC 的影响、容量参考）。
+
 > 📖 **客户使用指导**（标定 URDF 加载 + 数据录制的完整排查步骤）见
 > [`docs/customer-guide-calibration-and-recording.md`](docs/customer-guide-calibration-and-recording.md)。
 > 关键结论：**默认用户永远回落内置 URDF、忽略标定；要加载标定必须用具名用户。**
@@ -268,6 +272,9 @@ hand2_beta2   越界最大=0.0000 rad  越界帧占比=0.0%
 
 ```bash
 tools/fetch_hand2_description.sh    # → wuji_hand_description2/（约 18MB，不入库）
+
+# 判定一批数据到底属于哪套手模型（上面那组数字就是这么来的）
+./venv312/bin/python tools/check_model_fit.py data/episodes
 ```
 
 拉下来后 `--hand-model wuji_hand_2` 会自动用它；没拉则回落一代并打印告警。
