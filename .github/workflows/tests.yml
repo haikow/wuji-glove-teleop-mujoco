@@ -1,0 +1,49 @@
+name: offline tests
+
+# 数据管线的门禁：这些测试全部不需要手套/真机/GPU —— 用合成 MCAP 夹具驱动，
+# 所以能在 CI 里跑。需要硬件的部分（录制回路、真机跟踪）由离线假订阅覆盖。
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  offline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: 装最小依赖（不装 wuji-sdk / torch / lerobot）
+        run: |
+          python -m pip install -U pip
+          # QC 规则本身只用标准库；mcap 用来读 obs.mcap，numpy/mujoco 用于网格与几何，
+          # rerun-sdk 用于可视化导出。lerobot/torch 太重，相关用例会自动 skip。
+          pip install mcap numpy mujoco rerun-sdk
+
+      - name: QC 规则（纯标准库）
+        run: python tests/test_qc_episode.py
+
+      - name: MCAP join / 真机跟踪滞后 / rerun 导出
+        run: python tests/test_mcap_join.py
+
+      - name: 导出筛选 / 溯源分组守卫 / 标注 / 手型解析
+        run: python tests/test_export_label.py
+
+      - name: 合成缺陷样本端到端过一遍 QC
+        run: |
+          python tools/synth_episode.py --out /tmp/fw/episodes --defect all
+          python tools/qc_episode.py /tmp/fw/episodes
+          # 12 条里应当恰好 3 条通过（none / lowconf / tactile_dead 只警告不拦截）
+          python - <<'PY'
+          import json, os, sys
+          eps = sorted(os.listdir('/tmp/fw/episodes'))
+          ok = sum(json.load(open('/tmp/fw/episodes/%s/quality.json' % e))['pass'] for e in eps)
+          print('%d/%d passed' % (ok, len(eps)))
+          sys.exit(0 if (len(eps), ok) == (12, 3) else 1)
+          PY
