@@ -39,6 +39,28 @@ from tools.viz_episode import (  # noqa: E402
 
 TACTILE_ROWS, TACTILE_COLS = 24, 31
 
+# 蓝→青→绿→黄→红 的分段线性色标。不用 matplotlib（没装），5 个锚点足够读数。
+_CMAP = np.array([[12, 20, 70], [0, 140, 200], [0, 200, 120],
+                  [240, 220, 40], [220, 40, 30]], np.float32)
+_INVALID_RGB = np.array([45, 45, 50], np.uint8)     # -1 = 无效/屏蔽 taxel
+
+
+def tactile_rgb(data, vmax=1.0, rows=TACTILE_ROWS, cols=TACTILE_COLS):
+    """744 个 taxel → HxWx3 uint8 热力图。
+
+    单通道 float 直接 log 成 rr.Image 会被按灰度画，0~0.9 的值几乎全黑、看不出接触，
+    所以这里自己上色标。-1 的无效 taxel 单独染深灰，不和"无接触"混为一谈。
+    """
+    v = np.asarray(data, np.float32).reshape(rows, cols)
+    invalid = v < 0
+    t = np.clip(v / max(vmax, 1e-6), 0.0, 1.0)
+    idx = t * (len(_CMAP) - 1)
+    lo = np.clip(np.floor(idx).astype(int), 0, len(_CMAP) - 2)
+    frac = (idx - lo)[..., None]
+    rgb = (_CMAP[lo] * (1 - frac) + _CMAP[lo + 1] * frac).astype(np.uint8)
+    rgb[invalid] = _INVALID_RGB
+    return rgb
+
 
 def read_mcap(path, topics=("hand_skeleton", "emf_poses", "tactile",
                             "hand_joint_angles", "joint_states")):
@@ -77,18 +99,20 @@ def _pose_arrays(poses):
 
 
 def _blueprint(rrb, has_tactile, has_emf, has_robot):
-    tabs = []
+    """3D 占主位；触觉图**单独给一个常驻视图**，不塞进标签页里（塞进去不选中就看不见）。"""
+    tabs = [rrb.TimeSeriesView(origin="/conf", name="关节置信度")]
     if has_tactile:
-        tabs.append(rrb.Spatial2DView(origin="/tactile", name="触觉 24×31"))
-    tabs.append(rrb.TimeSeriesView(origin="/conf", name="关节置信度"))
+        tabs.insert(0, rrb.TimeSeriesView(origin="/tactile_stat", name="触觉峰值/接触数"))
     if has_robot:
         tabs.append(rrb.TimeSeriesView(origin="/retarget", name="retarget 关节角"))
-    views = [rrb.Spatial3DView(origin="/world", name="手骨架 / EMF / 机器人手")]
-    if tabs:
-        return rrb.Blueprint(rrb.Horizontal(*views, rrb.Tabs(*tabs),
-                                            column_shares=[3, 2]),
-                             collapse_panels=True)
-    return rrb.Blueprint(views[0], collapse_panels=True)
+    right = [rrb.Tabs(*tabs)]
+    if has_tactile:
+        right.insert(0, rrb.Spatial2DView(origin="/tactile", name="触觉热力图 24×31"))
+    return rrb.Blueprint(
+        rrb.Horizontal(rrb.Spatial3DView(origin="/world", name="手骨架 / EMF / 机器人手"),
+                       rrb.Vertical(*right, row_shares=[2, 1]) if has_tactile else right[0],
+                       column_shares=[3, 2]),
+        collapse_panels=True)
 
 
 def main():
@@ -104,6 +128,11 @@ def main():
     ap.add_argument("--hand-model", default="wuji_hand",
                     choices=["wuji_hand", "wuji_hand_2"])
     ap.add_argument("--mjcf", default="")
+    ap.add_argument("--tactile-max", type=float, default=0.0,
+                    help="触觉色标上限；0=按本次录制的 p99 自动定标。"
+                         "跨录制比较时给固定值（如 1.0）")
+    ap.add_argument("--contact-thresh", type=float, default=0.05,
+                    help="统计\"有接触 taxel 数\"的阈值")
     args = ap.parse_args()
 
     import rerun as rr
@@ -160,6 +189,16 @@ def main():
             i -= 1
         return arr[i][1]
 
+    # 色标上限：实测单帧峰值常只有 0.4~0.5，固定用 1.0 会让颜色停在蓝青段、
+    # 浪费一半动态范围，看着像"没接触"。默认按本次录制的 p99 定标。
+    tac_max = args.tactile_max
+    if tac_max <= 0 and tac:
+        allv = np.concatenate([np.asarray(x[1]["data"], np.float32) for x in tac[::10]])
+        allv = allv[allv >= 0]
+        tac_max = float(np.percentile(allv, 99)) if allv.size else 1.0
+        tac_max = max(tac_max, 0.05)
+        print("  触觉色标上限（p99 自动）= %.3f" % tac_max)
+
     t0 = sk[0][0]
     for ts, s in sk[::args.stride]:
         rr.set_time("t", duration=(ts - t0) / 1e6)
@@ -199,8 +238,13 @@ def main():
 
         t = nearest(tac_t, tac, ts)
         if t and len(t.get("data") or []) == TACTILE_ROWS * TACTILE_COLS:
-            img = np.asarray(t["data"], np.float32).reshape(TACTILE_ROWS, TACTILE_COLS)
-            rr.log("/tactile/grid", rr.Image(np.clip(img, 0.0, None)))
+            raw = np.asarray(t["data"], np.float32)
+            rr.log("/tactile/grid", rr.Image(tactile_rgb(raw, tac_max)))
+            valid = raw[raw >= 0]
+            # 有了标量才能在时间轴上找到"什么时候按下去了"，光看图得逐帧翻
+            rr.log("/tactile_stat/peak", rr.Scalars(float(valid.max()) if valid.size else 0.0))
+            rr.log("/tactile_stat/contact_taxels",
+                   rr.Scalars(float((valid > args.contact_thresh).sum())))
 
         if sess is not None and xyz.shape == (21, 3):
             q20 = np.asarray(sess.step(xyz.astype(np.float32)), float)

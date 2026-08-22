@@ -291,6 +291,25 @@ class McapJoinTest(unittest.TestCase):
         ts = [t for t, _ in d["hand_skeleton"]]
         self.assertEqual(ts, sorted(ts))
 
+    def test_tactile_rgb_heatmap(self):
+        """触觉必须上色标；单通道 float 直接 log 会被画成近乎全黑的灰度图。"""
+        import numpy as np
+        from tools.viz_mcap import TACTILE_COLS, TACTILE_ROWS, tactile_rgb
+        v = np.linspace(0, 1, TACTILE_ROWS * TACTILE_COLS).astype(np.float32)
+        v[:50] = -1.0                                  # 无效/屏蔽 taxel
+        rgb = tactile_rgb(v, vmax=1.0)
+        self.assertEqual(rgb.shape, (TACTILE_ROWS, TACTILE_COLS, 3))
+        self.assertEqual(rgb.dtype, np.uint8)
+        # 无效区单独一种深灰，不能和"无接触"混色
+        flat = rgb.reshape(-1, 3)
+        self.assertTrue(np.all(flat[:50] == flat[0]))
+        self.assertFalse(np.array_equal(flat[0], flat[-1]))
+        # 有梯度：不能是一片死色
+        self.assertGreater(len(np.unique(flat[50:], axis=0)), 20)
+        # 低值偏蓝、高值偏红
+        self.assertGreater(int(flat[60][2]), int(flat[60][0]))
+        self.assertGreater(int(flat[-1][0]), int(flat[-1][2]))
+
     def test_quat_to_mat_is_orthonormal(self):
         """关节朝向靠这个转矩阵画轴，转错了整只手的朝向就是错的。"""
         import numpy as np

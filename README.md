@@ -467,7 +467,13 @@ rerun data/episodes/ep_xxx/episode.rrd  # 本地打开
 ```
 
 渲染 `/world/skeleton`（21 点 + 骨架 + **逐关节朝向轴**）、`/world/emf`（5 个线圈 6-DoF）、
-`/tactile`（744 taxel → 24×31 图）、`--retarget` 时再加 `/world/robot`（MJCF 真网格）。
+`/tactile`（744 taxel → 24×31 热力图，独立常驻视图）、`/tactile_stat`（峰值 + 接触 taxel 数曲线）、
+`--retarget` 时再加 `/world/robot`（MJCF 真网格）。
+
+触觉两个坑（都已处理）：单通道 float 直接 `rr.Image` 会被按灰度画、0~0.9 的值几乎全黑，
+所以自己上蓝→青→绿→黄→红色标，`-1` 的无效 taxel 单独染深灰（正好勾出手型）；
+色标上限默认按本次录制的 **p99 自动定标**（实测单帧峰值常只有 0.3~0.5，
+固定用 1.0 会让颜色停在蓝青段），跨录制比较时用 `--tactile-max 1.0` 固定。
 
 **录制里的数据是全的**（实测官方三 topic 录制）：
 
