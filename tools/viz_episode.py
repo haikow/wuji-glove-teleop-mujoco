@@ -72,6 +72,47 @@ def _predict(policy_path, frames, obs_mode):
     return Y * as_ + am, mode
 
 
+# MediaPipe 手骨架连线（同 glove_teleop_live.SK_CONN）
+SK_CONN = [(0, 1), (1, 2), (2, 3), (3, 4), (0, 5), (5, 6), (6, 7), (7, 8),
+           (0, 9), (9, 10), (10, 11), (11, 12), (0, 13), (13, 14), (14, 15), (15, 16),
+           (0, 17), (17, 18), (18, 19), (19, 20), (5, 9), (9, 13), (13, 17)]
+
+
+def log_rerun(ep_dir, frames, out, joint_names=None, pred=None, stride=1):
+    """把 episode 写成 .rrd：3D 手骨架 + 逐关节指令/实测/误差时间序列。
+
+    落盘而不是开窗：这台机器常跑无头 EGL。拿到 .rrd 后本地 `rerun <file>.rrd` 打开。
+    """
+    import rerun as rr
+
+    rr.init("wuji_episode_%s" % os.path.basename(os.path.normpath(ep_dir)))
+    names = joint_names or ["j%d" % i for i in range(20)]
+    t0 = frames[0].get("t_dev_us") or 0
+    for i, f in enumerate(frames[::stride]):
+        k = i * stride
+        rr.set_time("t", duration=((f.get("t_dev_us") or t0) - t0) / 1e6)
+        sk = f.get("skeleton")
+        if sk:
+            rr.log("glove/skeleton", rr.Points3D(sk, radii=0.004))
+            rr.log("glove/bones", rr.LineStrips3D([[sk[a], sk[b]] for a, b in SK_CONN],
+                                                  radii=0.0015))
+        act = f.get("action")
+        hs = f.get("hand_state")
+        for j, nm in enumerate(names[:20]):
+            if act and j < len(act):
+                rr.log("action/%s" % nm, rr.Scalars(act[j]))
+            if hs and j < len(hs) and hs[j] is not None:
+                rr.log("hand_state/%s" % nm, rr.Scalars(hs[j]))
+                if act and j < len(act):
+                    rr.log("track_err/%s" % nm, rr.Scalars(abs(hs[j] - act[j])))
+            if pred is not None and j < pred.shape[1]:
+                rr.log("policy/%s" % nm, rr.Scalars(float(pred[k, j])))
+        if f.get("confidence"):
+            rr.log("glove/conf_min", rr.Scalars(min(f["confidence"])))
+    rr.save(out)
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser(description="episode 回看 / 策略回放")
     ap.add_argument("episode")
@@ -84,6 +125,9 @@ def main():
     ap.add_argument("--fps", type=int, default=30)
     ap.add_argument("--stride", type=int, default=1, help="每 N 帧渲一帧")
     ap.add_argument("--stats-only", action="store_true", help="只算误差不渲染")
+    ap.add_argument("--rerun", action="store_true",
+                    help="写 .rrd（3D 骨架 + 指令/实测/误差时间序列），本地 rerun 打开")
+    ap.add_argument("--rerun-stride", type=int, default=2, help="rerun 每 N 帧记一次")
     ap.add_argument("--w", type=int, default=640)
     ap.add_argument("--h", type=int, default=480)
     args = ap.parse_args()
@@ -107,6 +151,16 @@ def main():
         print("  MAE  = %.5f rad (%.3f°)" % (err.mean(), np.degrees(err.mean())))
         print("  RMSE = %.5f rad" % np.sqrt(((pred - recorded) ** 2).mean()))
         print("  最差关节: idx=%d MAE=%.5f rad" % (err.mean(0).argmax(), err.mean(0).max()))
+
+    if args.rerun:
+        out = args.out or os.path.join(args.episode, "episode.rrd")
+        if not out.endswith(".rrd"):
+            out = os.path.splitext(out)[0] + ".rrd"
+        jn = (meta.get("action_space") or {}).get("joint_names")
+        log_rerun(args.episode, frames, out, jn,
+                  pred if args.policy else None, args.rerun_stride)
+        print("rerun → %s（本地打开： rerun %s）" % (out, out))
+        return 0
 
     if args.stats_only:
         return 0

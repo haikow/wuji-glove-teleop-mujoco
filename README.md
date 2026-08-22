@@ -422,7 +422,16 @@ MUJOCO_GL=egl ./venv312/bin/python tools/viz_episode.py data/episodes/ep_xxx
 MUJOCO_GL=egl ./venv312/bin/python tools/viz_episode.py data/episodes/ep_xxx \
     --policy data/models/bc.pt --out policy.mp4     # 策略回放 + 逐关节误差
 ./venv312/bin/python tools/viz_episode.py data/episodes/ep_xxx --stats-only
+
+# Rerun：3D 手骨架 + 逐关节 指令/实测/跟踪误差/策略预测 时间序列
+./venv312/bin/python tools/viz_episode.py data/episodes/ep_xxx --rerun
+./venv312/bin/python tools/viz_episode.py data/episodes/ep_xxx --rerun \
+    --policy data/models/bc.pt          # 再多一层 policy/<joint> 曲线
+rerun data/episodes/ep_xxx/episode.rrd  # 本地打开
 ```
+
+`--rerun` 落 `.rrd` 文件而不是开窗 —— 这台机器常跑无头 EGL，落盘后在有显示器的机器上打开。
+一条 15s episode 约 2.9MB / 84 个 entity path。
 
 ### 10. 无硬件自测
 

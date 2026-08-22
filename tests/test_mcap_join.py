@@ -231,5 +231,35 @@ class McapJoinTest(unittest.TestCase):
                          [0, 3, 4, 7, 8, 16, 19])
 
 
+    # ---- Rerun 导出 ----
+    def test_rerun_export(self):
+        """--rerun 落 .rrd，且骨架/指令/实测/误差通道都在。"""
+        try:
+            import rerun  # noqa: F401
+        except ImportError:
+            self.skipTest("需要 rerun-sdk")
+        from tools.episode_format import load_frames
+        from tools.viz_episode import log_rerun
+        self._build(n=60, hand_lag=2)
+        frames = load_frames(self.ep)
+        out = os.path.join(self.tmp, "e.rrd")
+        log_rerun(self.ep, frames, out, ["j%d" % i for i in range(20)])
+        self.assertTrue(os.path.isfile(out))
+        self.assertGreater(os.path.getsize(out), 1000)
+
+    def test_rerun_export_without_hand_state(self):
+        """纯仿真 episode（没有真机反馈）也要能导出，不能因为缺 hand_state 崩。"""
+        try:
+            import rerun  # noqa: F401
+        except ImportError:
+            self.skipTest("需要 rerun-sdk")
+        from tools.episode_format import load_frames
+        from tools.viz_episode import log_rerun
+        self._build(n=40)
+        out = os.path.join(self.tmp, "e2.rrd")
+        log_rerun(self.ep, load_frames(self.ep), out)
+        self.assertTrue(os.path.isfile(out))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -11,3 +11,5 @@ numpy
 # 读 obs.mcap（录制端用的是 wuji-sdk 自带的 TopicRecorder，不需要额外依赖；
 # 质检/导出要把 MCAP 解回来，才需要这个）
 mcap
+# 可选：tools/viz_episode.py --rerun 才需要（3D 骨架 + 时间序列回看）
+rerun-sdk
