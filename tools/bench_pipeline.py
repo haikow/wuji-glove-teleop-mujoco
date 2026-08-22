@@ -27,7 +27,9 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tools import synth_episode  # noqa: E402
-from tools.export_dataset import _obs_names, _obs_vector, parse_obs_mode  # noqa: E402
+from tools.export_dataset import (  # noqa: E402
+    _obs_names, _obs_vector, parse_obs_mode, skip_embed_images_when_no_media,
+)
 from tools.qc_episode import qc_episode  # noqa: E402
 
 
@@ -79,8 +81,11 @@ def bench_qc(paths):
     return npass
 
 
-def bench_export(input_dir, out, repo_id, obs_mode, fps):
-    """绕过 CLI 直接调库，免得把 argparse 和打印算进耗时。"""
+def bench_export(input_dir, out, repo_id, obs_mode, fps, skip_embed=True):
+    """绕过 CLI 直接调库，免得把 argparse 和打印算进耗时。
+
+    skip_embed 与 tools/export_dataset.py 走同一个开关，压测数字才和实际导出一致。
+    """
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
     from tools.episode_format import iter_frames, load_meta
@@ -96,20 +101,21 @@ def bench_export(input_dir, out, repo_id, obs_mode, fps):
                               "names": _obs_names(obs_mode, n_ja)},
         "action": {"dtype": "float32", "shape": (adim,), "names": None},
     }
-    ds = LeRobotDataset.create(repo_id=repo_id, fps=fps, features=features,
-                               root=out, robot_type="bench", use_videos=False)
     import numpy as np
     total = 0
-    for ep in eps:
-        meta = load_meta(ep)
-        for f in iter_frames(ep):
-            ds.add_frame({
-                "observation.state": np.asarray(_obs_vector(f, obs_mode), np.float32),
-                "action": np.asarray(f["action"], np.float32),
-                "task": meta.get("task") or "bench",
-            })
-            total += 1
-        ds.save_episode()
+    with skip_embed_images_when_no_media(skip_embed):
+        ds = LeRobotDataset.create(repo_id=repo_id, fps=fps, features=features,
+                                   root=out, robot_type="bench", use_videos=False)
+        for ep in eps:
+            meta = load_meta(ep)
+            for f in iter_frames(ep):
+                ds.add_frame({
+                    "observation.state": np.asarray(_obs_vector(f, obs_mode), np.float32),
+                    "action": np.asarray(f["action"], np.float32),
+                    "task": meta.get("task") or "bench",
+                })
+                total += 1
+            ds.save_episode()
     return total, odim, adim
 
 
@@ -186,6 +192,8 @@ def main():
     ap.add_argument("--sweep", action="store_true",
                     help="dataloader 额外扫 batch_size × pin_memory × prefetch")
     ap.add_argument("--repo-id", default="local/bench")
+    ap.add_argument("--no-skip-embed", action="store_true",
+                    help="导出走官方原始路径（不跳过 embed_images），用于前后对比")
     ap.add_argument("--json-out", default="", help="把结果写成 JSON")
     args = ap.parse_args()
 
@@ -241,7 +249,8 @@ def main():
             print("[3/4] 导出 LeRobot ...")
             with Stage("export", results) as st:
                 total, odim, adim = bench_export(eps_dir, ds_dir, args.repo_id,
-                                                 args.obs, int(args.hz))
+                                                 args.obs, int(args.hz),
+                                                 not args.no_skip_embed)
             results["export"].update(frames=total, obs_dim=odim, action_dim=adim,
                                      frames_per_s=round(total / st.dt, 0),
                                      disk_mb=round(dir_size_mb(ds_dir), 1))

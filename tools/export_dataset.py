@@ -20,10 +20,12 @@ per-user 标定模型，两者 action 分布不同。所以默认按
     ... --task pick_cube --no-qc-filter --include-failures
 """
 import argparse
+import contextlib
 import json
 import os
 import shutil
 import sys
+import time
 
 import numpy as np
 
@@ -133,6 +135,49 @@ def group_key(meta, action_dim, obs_dim):
             action_dim, obs_dim)
 
 
+@contextlib.contextmanager
+def skip_embed_images_when_no_media(enabled=True):
+    """绕开 LeRobot 对无图像数据集也逐行跑 embed_images 的开销。
+
+    profile 结论（60 条 × 300 帧）：`save_episode` 里 77% 的时间花在
+    `embed_images` → `datasets.map(embed_table_storage, batched=False)`，
+    它**逐帧**调用且每帧都从 arrow schema 重建一次 Features（18000 帧触发
+    18180 次 from_arrow_schema）。而我们的数据集只有 observation.state / action，
+    一个 Image/Audio 列都没有，这份工作完全是空转。
+
+    这里在调用点按**实际列类型**判断：没有媒体列才跳过，有就原样走官方实现，
+    所以即使以后加了相机也不会静默丢数据。实测 2458 → 7277 帧/s（2.96×）。
+    """
+    if not enabled:
+        yield False
+        return
+    try:
+        import datasets as hfds
+        import lerobot.datasets.dataset_writer as dw
+    except Exception:
+        yield False
+        return
+
+    media_types = tuple(t for t in (getattr(hfds, "Image", None),
+                                    getattr(hfds, "Audio", None)) if t)
+    if not media_types or not hasattr(dw, "embed_images"):
+        yield False
+        return
+
+    original = dw.embed_images
+
+    def maybe_embed(dataset):
+        if not any(isinstance(f, media_types) for f in dataset.features.values()):
+            return dataset
+        return original(dataset)
+
+    dw.embed_images = maybe_embed
+    try:
+        yield True
+    finally:
+        dw.embed_images = original
+
+
 def verify(root, repo_id):
     """把导出的数据集用 LeRobotDataset 读回来 —— 证明它真的能被训练栈消费。"""
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
@@ -185,6 +230,8 @@ def main():
                     help="允许把不同 task/side/手模型的 episode 混进同一个数据集")
     ap.add_argument("--overwrite", action="store_true")
     ap.add_argument("--dry-run", action="store_true", help="只打印将要导出的内容")
+    ap.add_argument("--no-skip-embed", action="store_true",
+                    help="不跳过 embed_images（用官方原始路径，约慢 3×）")
     ap.add_argument("--verify", default="", metavar="DATASET_ROOT",
                     help="不导出，改为把已有数据集用 LeRobotDataset 读回来自检")
     args = ap.parse_args()
@@ -267,26 +314,35 @@ def main():
         "observation.timestamp_dev": {"dtype": "float32", "shape": (1,), "names": None},
     }
 
-    ds = LeRobotDataset.create(repo_id=args.repo_id, fps=fps, features=features,
-                               root=args.out, robot_type=args.robot_type,
-                               use_videos=False)
-    for ep, meta, frames in eps:
-        t0 = frames[0].get("t_dev_us") or 0
-        for fr in frames:
-            ds.add_frame({
-                "observation.state": np.asarray(_obs_vector(fr, args.obs), np.float32),
-                "action": np.asarray(fr["action"], np.float32),
-                "observation.timestamp_dev": np.asarray(
-                    [((fr.get("t_dev_us") or t0) - t0) / 1e6], np.float32),
-                "task": meta.get("task") or task_name,
-            })
-        ds.save_episode()
-        print("  saved %s (%d 帧)" % (os.path.basename(ep), len(frames)))
+    t_start = time.perf_counter()
+    with skip_embed_images_when_no_media(not args.no_skip_embed) as skipped:
+        ds = LeRobotDataset.create(repo_id=args.repo_id, fps=fps, features=features,
+                                   root=args.out, robot_type=args.robot_type,
+                                   use_videos=False)
+        for ep, meta, frames in eps:
+            t0 = frames[0].get("t_dev_us") or 0
+            for fr in frames:
+                ds.add_frame({
+                    "observation.state": np.asarray(_obs_vector(fr, args.obs), np.float32),
+                    "action": np.asarray(fr["action"], np.float32),
+                    "observation.timestamp_dev": np.asarray(
+                        [((fr.get("t_dev_us") or t0) - t0) / 1e6], np.float32),
+                    "task": meta.get("task") or task_name,
+                })
+            ds.save_episode()
+            print("  saved %s (%d 帧)" % (os.path.basename(ep), len(frames)))
+    elapsed = time.perf_counter() - t_start
+    rate = total / elapsed if elapsed > 0 else 0.0
 
     # 溯源清单：哪些 episode、什么身份、什么 SDK 版本进了这个数据集
     prov = {
         "source_input": os.path.abspath(args.input),
         "obs_mode": args.obs, "fps": fps, "allow_mixed": args.allow_mixed,
+        # 常在的吞吐信号：不用专门跑压测也能看出这次导出快慢，
+        # 和 docs/findings.md §8 的基准（30 万帧 2391 帧/s，跳过 embed 后约 7000）比即可
+        "export_seconds": round(elapsed, 2),
+        "export_frames_per_s": round(rate, 1),
+        "skipped_embed_images": bool(skipped),
         "episodes": [{
             "episode_id": m.get("episode_id"), "path": os.path.abspath(e),
             "frames": len(f), "success": m.get("success"),
@@ -301,6 +357,11 @@ def main():
         json.dump(prov, f, ensure_ascii=False, indent=2)
 
     print("\n完成：%d 条 / %d 帧 → %s" % (len(eps), total, args.out))
+    print("导出耗时 %.1fs，%.0f 帧/s%s"
+          % (elapsed, rate, "（已跳过无用的 embed_images）" if skipped else ""))
+    if rate < 500:
+        print("[warn] 导出吞吐明显低于基准（30 万帧实测 2391 帧/s，"
+              "跳过 embed 后约 7000）—— 磁盘或 CPU 可能有争用")
     print("校验： ./venv312/bin/python tools/export_dataset.py --verify %s" % args.out)
     return 0
 

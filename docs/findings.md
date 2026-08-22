@@ -170,9 +170,11 @@ retarget 回路用"取最新帧"主动跳过积压以免累积延迟，而 MCAP 
 
 | 阶段 | 耗时 | 吞吐 | 备注 |
 |---|---|---|---|
-| QC | 11.4s | **88 条/s · 26421 帧/s** | 纯标准库单进程，1000/1000 通过 |
-| 导出 LeRobot | 125.5s | **2391 帧/s** | 730 MB JSONL → 179 MB parquet（**0.25×**） |
-| 峰值内存 | — | **998 MB** | 全程单进程，不随 episode 数线性增长 |
+| QC | 11.2s | **89 条/s · 26731 帧/s** | 纯标准库单进程，1000/1000 通过 |
+| 导出 LeRobot（优化前） | 125.5s | 2391 帧/s | — |
+| 导出 LeRobot（优化后） | **43.8s** | **6846 帧/s** | 见 §11，产物逐位一致 |
+| 峰值内存 | — | **815 MB** | 全程单进程，不随 episode 数线性增长 |
+| 磁盘 | — | — | 730 MB JSONL → 179 MB parquet（**0.25×**） |
 
 ⚠️ **小规模测出来的导出速率会严重低估**：5 条 × 200 帧时只有 340 帧/s，因为被
 `save_episode()` 的 per-episode 固定开销主导；到 1000 条时是 2391 帧/s，差 7 倍。
@@ -216,6 +218,53 @@ retarget 回路用"取最新帧"主动跳过积压以免累积延迟，而 MCAP 
 ./venv312/bin/python tools/bench_pipeline.py --dataset <数据集目录> \
     --dataloader-workers 0 2 4 8 12 --sweep
 ```
+
+## 11. 导出提速 2.9×：给没有图像的数据集"嵌入图像"
+
+**怎么发现的**：§8 显示导出是链路里最慢的一段，但**先别急着并行化** —— 2391 帧/s 意味着
+1 小时真机采集（43 万帧）只要 3 分钟，到 100 小时才开始疼。先 profile 再动手。
+
+`cProfile` 结果（60 条 × 300 帧）：
+
+```
+save_episode              17.9s
+└─ _save_episode_data     15.8s
+   └─ embed_images        14.4s   ← 占 77%
+      └─ datasets.map(embed_table_storage, batched=False)
+         apply_function        被调 18000 次（逐帧）
+         from_arrow_schema     被调 18180 次（每帧重建一次 Features）
+```
+
+**根因**：`lerobot/datasets/io_utils.py: embed_images()` **无条件**跑
+`dataset.map(embed_table_storage, batched=False)`。而我们的数据集
+`use_videos=False`、features 只有 `observation.state` / `action` / `timestamp_dev`，
+**一个 Image/Audio 列都没有** —— 这份逐行 + 逐行重建 schema 的工作是纯空转。
+
+**改法**：在调用点按**实际列类型**判断，没有媒体列才跳过；有相机就原样走官方实现，
+所以以后加了图像也不会静默丢数据（`tools/export_dataset.py:
+skip_embed_images_when_no_media`，`--no-skip-embed` 可关掉做对比）。
+
+**效果**：
+
+| 数据 | 优化前 | 优化后 | 倍数 |
+|---|---|---|---|
+| 真机 19 条 / 22350 帧 | 2887 帧/s | **12782 帧/s** | 4.4× |
+| 合成 1000 条 / 30 万帧 | 2391 帧/s | **6846 帧/s** | 2.9× |
+
+**正确性**：同一批数据两条路径各导一次，抽检 231 帧，`observation.state` /
+`action` / `timestamp_dev` 三个张量最大差异 **0.000e+00**，`meta/stats` 一致，
+产物大小同为 14.81 MB。安全边界有单测守着（有 Image 列时必须不跳）：
+`tests/test_export_label.py: SkipEmbedImagesTest`。
+
+**这是上游可以改的**：`embed_images` 加一个"无媒体列直接返回"的短路，对所有
+纯本体感（state/action）数据集都有效；顺带 `batched=False` 改成 `batched=True`
+对有图像的场景也该有明显收益。
+
+## 12. 怎么知道导出慢了
+
+不用专门跑压测：`export_dataset.py` 每次导出都会打印耗时与帧率，并写进
+`wuji_provenance.json` 的 `export_seconds` / `export_frames_per_s` /
+`skipped_embed_images`；低于 500 帧/s 会直接告警。拿它和 §8 的基准比即可。
 
 ## 10. CI 抓到的可移植性问题
 

@@ -192,6 +192,58 @@ class LabelTest(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LEROBOT, "需要 lerobot")
+class SkipEmbedImagesTest(unittest.TestCase):
+    """跳过 embed_images 的安全边界：只有真没有媒体列时才跳。
+
+    这个优化把导出从 2887 提到 12782 帧/s（真机 19 条数据），但如果在有相机的
+    数据集上误跳，图像字节不会被嵌进 parquet —— 属于静默丢数据，必须挡住。
+    """
+
+    def setUp(self):
+        import datasets as hfds
+        import lerobot.datasets.dataset_writer as dw
+        self.hfds, self.dw = hfds, dw
+        self.calls = []
+        self._orig = dw.embed_images
+        dw.embed_images = lambda d: (self.calls.append(d) or d)
+
+    def tearDown(self):
+        self.dw.embed_images = self._orig
+
+    class _FakeDS:
+        def __init__(self, features):
+            self.features = features
+
+    def test_skips_when_no_media_columns(self):
+        from tools.export_dataset import skip_embed_images_when_no_media
+        ds = self._FakeDS({"observation.state": self.hfds.Value("float32"),
+                           "action": self.hfds.Value("float32")})
+        with skip_embed_images_when_no_media(True) as active:
+            self.assertTrue(active)
+            self.dw.embed_images(ds)
+        self.assertEqual(self.calls, [])          # 原实现没被调用
+
+    def test_does_not_skip_when_image_column_present(self):
+        from tools.export_dataset import skip_embed_images_when_no_media
+        ds = self._FakeDS({"observation.state": self.hfds.Value("float32"),
+                           "observation.images.cam": self.hfds.Image()})
+        with skip_embed_images_when_no_media(True) as active:
+            self.assertTrue(active)
+            self.dw.embed_images(ds)
+        self.assertEqual(len(self.calls), 1)      # 有图像 → 走官方实现
+
+    def test_disabled_restores_original(self):
+        from tools.export_dataset import skip_embed_images_when_no_media
+        with skip_embed_images_when_no_media(False) as active:
+            self.assertFalse(active)
+        self.assertIsNot(self.dw.embed_images, self._orig)   # setUp 的桩仍在
+        # 退出上下文后不能把别人的补丁擦掉
+        ds = self._FakeDS({"a": self.hfds.Value("float32")})
+        self.dw.embed_images(ds)
+        self.assertEqual(len(self.calls), 1)
+
+
+@unittest.skipUnless(HAVE_LEROBOT, "需要 lerobot")
 class ExportRoundTripTest(unittest.TestCase):
     """真的导出一次并用 LeRobotDataset 读回 —— 证明格式确实能被训练栈消费。"""
 

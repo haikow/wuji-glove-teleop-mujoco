@@ -505,9 +505,15 @@ rerun data/episodes/ep_xxx/episode.rrd  # 本地打开
 ./venv312/bin/python tools/bench_pipeline.py --dataset <数据集> --sweep   # 只调 dataloader
 ```
 
-30 万帧实测：QC **26421 帧/s**、导出 **2391 帧/s**（730MB JSONL → 179MB parquet）、
-峰值内存 **998MB**；dataloader 调参后 **13 059 → 87 844 samples/s（6.73×）**。
-瓶颈在导出段而非取样段。详见 [`docs/findings.md`](docs/findings.md) §8–9。
+30 万帧实测：QC **26731 帧/s**、导出 **6846 帧/s**（730MB JSONL → 179MB parquet）、
+峰值内存 **815MB**；dataloader 调参后 **13 059 → 87 844 samples/s（6.73×）**。
+
+导出那 6846 是优化后的数字：profile 发现 77% 的时间花在给**没有图像的数据集**跑
+`embed_images`（逐帧 + 每帧重建 Features schema），按实际列类型短路后 2.9~4.4×，
+产物逐位一致。详见 [`docs/findings.md`](docs/findings.md) §8/§9/§11。
+
+每次导出都会打印耗时与帧率并写进 `wuji_provenance.json`，低于 500 帧/s 直接告警 ——
+不用专门跑压测也能发现变慢（§12）。
 
 ### 10. 无硬件自测
 
