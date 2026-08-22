@@ -454,6 +454,35 @@ rerun data/episodes/ep_xxx/episode.rrd  # 本地打开
 自带 blueprint：3D 占主视图，`action`/`hand_state`/`track_err`/`policy` 四组曲线收进右侧标签页
 —— 否则 80 条标量会把 3D 挤没。
 
+### 9b. 直接可视化 SDK 录的 MCAP
+
+官方 `examples/python/wuji_glove/2.recording.py` 只产 MCAP、**不带可视化**。
+`tools/viz_mcap.py` 吃任意 `TopicRecorder` 录的 MCAP，不需要 episode 目录、不需要连设备：
+
+```bash
+./venv312/bin/python tools/viz_mcap.py rec.mcap
+# 离线复算 retarget 并渲染机器人手（同样不连设备）
+./venv312/bin/python tools/viz_mcap.py rec.mcap --retarget --hand-model wuji_hand_2
+./venv312/bin/rerun rec.rrd
+```
+
+渲染 `/world/skeleton`（21 点 + 骨架 + **逐关节朝向轴**）、`/world/emf`（5 个线圈 6-DoF）、
+`/tactile`（744 taxel → 24×31 图）、`--retarget` 时再加 `/world/robot`（MJCF 真网格）。
+
+**录制里的数据是全的**（实测官方三 topic 录制）：
+
+| topic | 频率 | frame_id | 内容 |
+|---|---|---|---|
+| `hand_skeleton` | ~120Hz | `r_wrist` | 21 关节 position + orientation + confidence |
+| `emf_poses` | ~120Hz | `r_hand_emf_tx` | 5 指尖接收线圈 6-DoF + confidence |
+| `tactile` | ~120Hz | — | 744 值（-1 = 无效/屏蔽） |
+
+- 四元数是**真数据**不是占位符：`|q|` 恒为 1，21 个关节里只有 `wrist` 和 `thumb_cmc`
+  恒为单位四元数，其余 19 个带真实旋转。
+- ⚠️ **两个 topic 不同坐标系**：骨架在 `r_wrist`、EMF 在 `r_hand_emf_tx`。本工具各自
+  独立成组渲染，**没有对齐到同一世界系**。要接相机做同步渲染，还缺发射器→相机的外参，
+  那不在录制数据里，得自己标。
+
 ### 10. 无硬件自测
 
 ```bash
@@ -464,6 +493,7 @@ python3 tests/test_qc_episode.py                       # QC 规则（纯标准�
 ./venv312/bin/python tests/test_mcap_join.py           # MCAP join + 真机跟踪误差/滞后
 ./venv312/bin/python tests/test_record_dedup.py        # 录制回路去重/对齐/预热
 ./venv312/bin/python tests/test_export_label.py        # 导出筛选/分组守卫/标注/手型解析
+#   test_mcap_join.py 里还覆盖 rerun 导出（含真网格）与裸 MCAP 读取/四元数转换
 ```
 
 

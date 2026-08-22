@@ -275,6 +275,31 @@ class McapJoinTest(unittest.TestCase):
                   ["j%d" % i for i in range(20)], mjcf=mjcf)
         self.assertGreater(os.path.getsize(out), 100_000)  # 带网格必然远大于纯曲线
 
+    def test_viz_mcap_reads_and_renders(self):
+        """SDK 录的裸 MCAP（无 episode 目录、无 action）也要能直接渲染。"""
+        try:
+            import rerun  # noqa: F401
+        except ImportError:
+            self.skipTest("需要 rerun-sdk")
+        from tools.viz_mcap import read_mcap
+        mcap_path = os.path.join(self.ep, "obs.mcap")
+        write_obs_mcap(mcap_path, list(range(1000, 1060)), hand_lag=1)
+        d = read_mcap(mcap_path)
+        self.assertIn("hand_skeleton", d)
+        self.assertEqual(len(d["hand_skeleton"]), 60)
+        # 时间戳必须递增（下游按最近时间戳对齐 tactile/emf 依赖这一点）
+        ts = [t for t, _ in d["hand_skeleton"]]
+        self.assertEqual(ts, sorted(ts))
+
+    def test_quat_to_mat_is_orthonormal(self):
+        """关节朝向靠这个转矩阵画轴，转错了整只手的朝向就是错的。"""
+        import numpy as np
+        from tools.viz_mcap import _quat_to_mat
+        for q in ([0, 0, 0, 1], [0.2634, -0.1411, 0.3648, 0.8818]):
+            R = _quat_to_mat(np.asarray(q, np.float32))
+            np.testing.assert_allclose(R @ R.T, np.eye(3), atol=1e-5)
+            self.assertAlmostEqual(float(np.linalg.det(R)), 1.0, places=4)
+
     def test_rerun_export_without_hand_state(self):
         """纯仿真 episode（没有真机反馈）也要能导出，不能因为缺 hand_state 崩。"""
         try:
