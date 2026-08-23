@@ -294,23 +294,46 @@ GPU 上都空转，结论永远是"GPU 利用率个位数"。扫三档规模才�
 **临界点在 13M~118M 参数之间**。低于它，GPU 是空的，砸显卡没用，钱该花在 CPU 核数和
 数据格式上；高于它才轮到 AMP / fused optimizer / compile。
 
-**这个区间正好卡在真实策略的规模上**——LeRobot 内置的 **ACT**（state-only，
-obs=108 → action=20）实测 **40.23M 参数**，落在 13M 与 118M 之间：
+### 用真实策略复核：参数量不是决定瓶颈的那个变量
 
-| 模型 | 参数 | 位置 |
-|---|---|---|
-| 本仓库 BC baseline | 0.10M | 远在翻转点左侧，GPU 空转 6% |
-| big（探针） | 12.85M | 仍是 IO 绑死 |
-| **ACT（LeRobot 内置）** | **40.23M** | **就在翻转带里** |
-| xl（探针） | 118M | 已是 compute 绑死 |
+上面三档都是 MLP 探针。拿真策略跑一遍（`tools/bench_policy.py`，LeRobot **ACT**，
+本项目 108 维观测按语义拆成 `observation.state`=真机手本体感 20 维 +
+`observation.environment_state`=手套 88 维，动作块 chunk=100）：
 
-所以这个测量不是学术练习，它回答的是一个具体决策：**现在的 BC 调 dataloader 就够了
-（AMP 开了只有 +3%），但一旦换成 ACT 这一档，AMP / fused Adam 就会从"白开"变成主要收益来源，
-worker 数也要重调。** 换模型时不用猜，照这条曲线选配置即可。
+| 配置 | samples/s | dataload% | fwd% | bwd% | GPU 利用率 | 峰值显存 |
+|---|---|---|---|---|---|---|
+| baseline（bs8, w0, fp32） | 109.9 | 44.4% | 14.8 | 25.6 | 49.5% | 828 MB |
+| tuned（bs16, w8, fp32） | 225.7 | 2.8% | 30.8 | 49.5 | 73.0% | 1029 MB |
+| tuned（bs16, w8, **fp16**） | 329.4 | 11.3% | 23.5 | 38.5 | 44.8% | 916 MB |
+| **+fused Adam** | **444.3** | 7.6% | 27.9 | 46.8 | 31.4% | 916 MB |
 
-⚠️ 口径说明：三档探针都是 **MLP**，同参数量下 transformer（ACT）的算子构成和访存模式不同，
-真实翻转点会有偏移。这里给的是**量级判断**，要精确定位应当直接拿 ACT 本身跑一遍
-（`tools/bench_train.py` 目前只支持 MLP 探针，接真实策略是待办）。
+**110 → 444 samples/s，4.04×**（3 次中位数）。AMP +46%、fused Adam 再 +35%。
+
+**结论要修正**：ACT 只有 **40.24M 参数，却已经是 compute 绑死**（dataload 仅 7.6%），
+而 MLP 探针要到 118M 才翻转。原因是 **ACT 每个样本要预测 100 步动作块**——
+
+> **决定瓶颈的不是参数量，是「每样本计算量」。** 参数量只是其中一个因子，
+> 动作块长度、序列长度、是否带视觉编码器都会把翻转点往左推。
+
+所以正确的用法是：**换模型/换 chunk 后重测这一条**，别拿参数量去外推。
+
+| 模型 | 参数 | 每样本预测步数 | 实测瓶颈 |
+|---|---|---|---|
+| 本仓库 BC baseline | 0.10M | 1 | IO（GPU 6%） |
+| big（MLP 探针） | 12.85M | 1 | IO |
+| **ACT（真实策略）** | **40.24M** | **100** | **compute** |
+| xl（MLP 探针） | 118M | 1 | compute |
+
+⚠️ 另一个口径提醒：这份数据里 `torch.cuda.utilization()` **不可信**——最优配置下它报
+31.4%，但分段计时显示 92% 的墙钟时间在 fwd/bwd/opt 上。该 API 按约 20ms 采样，
+kernel 又多又碎时会大量漏采。**以分段占比为准，别信这个百分比。**
+
+**复现**：
+
+```bash
+./venv312/bin/python tools/bench_policy.py --dataset data/datasets/finger_tap \
+    --repo-id local/wuji_finger_tap --batch-sizes 8 16 --repeats 3
+```
 
 **AMP 的收益完全跟着瓶颈走**（同 batch=1024 下 fp16 vs fp32）：
 

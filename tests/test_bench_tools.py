@@ -64,5 +64,30 @@ class BenchInferTest(unittest.TestCase):
         self.assertGreater(E2E_LATENCY_MS, FRAME_BUDGET_MS)   # 端到端必然大于单帧
 
 
+@unittest.skipUnless(HAVE_TORCH, "需要 torch")
+class BenchPolicyTest(unittest.TestCase):
+    """ACT 压测里那个 108 维观测的语义拆分必须对得上，切错就是喂错数据。"""
+
+    def test_dims_split_matches_export(self):
+        from tools.bench_policy import ENV_DIM, STATE_DIM
+        # 导出用的是 --obs skeleton,joints,hand = 63 + 25 + 20 = 108
+        self.assertEqual(ENV_DIM + STATE_DIM, 108)
+        self.assertEqual(STATE_DIM, 20)          # 真机手本体感 = 20 关节
+        self.assertEqual(ENV_DIM, 63 + 25)       # 手套骨架 21×3 + 手套关节 25
+
+    def test_slice_stats_only_touches_full_length_vectors(self):
+        """stats 里既有 108 维向量也有标量，切片不能把标量也切了。"""
+        import numpy as np
+        from tools.bench_policy import _slice_stats
+        st = {"mean": np.arange(108.0), "std": np.ones(108), "count": np.array([5])}
+        out = _slice_stats(st, 0, 88)
+        self.assertEqual(len(out["mean"]), 88)
+        self.assertEqual(len(out["std"]), 88)
+        self.assertEqual(len(out["count"]), 1)   # 标量原样保留
+        self.assertEqual(out["mean"][0], 0.0)
+        out2 = _slice_stats(st, 88, 108)
+        self.assertEqual(out2["mean"][0], 88.0)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

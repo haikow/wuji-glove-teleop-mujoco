@@ -518,16 +518,22 @@ rerun data/episodes/ep_xxx/episode.rrd  # 本地打开
 ### 9d. 训练与推理侧压测
 
 ```bash
-# 训练吞吐 / 显存 / GPU 利用率，扫模型规模找 IO→compute 临界点
+# 训练吞吐 / 显存 / GPU 利用率，扫模型规模找 IO→compute 临界点（MLP 探针）
 ./venv312/bin/python tools/bench_train.py --dataset data/datasets/finger_tap \
     --repo-id local/wuji_finger_tap --models mlp big xl --fused-adam
+
+# 拿真实策略（LeRobot ACT）复核，而不是用探针外推
+./venv312/bin/python tools/bench_policy.py --dataset data/datasets/finger_tap \
+    --repo-id local/wuji_finger_tap --batch-sizes 8 16
 
 # 推理尾延迟，与 120Hz 帧预算 / 33ms 端到端延迟对账
 ./venv312/bin/python tools/bench_infer.py --model data/models/bc_tap.pt
 ```
 
-**训练**（RTX 2060，5 次重复取中位数）：瓶颈翻转点在 **13M~118M 参数**之间——低于它
-GPU 空转（0.1M MLP 只有 6% 利用率、89% 时间在 dataload），高于它才轮到 AMP。
+**训练**（RTX 2060，重复取中位数）：MLP 探针测出翻转点在 13M~118M 参数之间，但拿
+**真实 ACT 策略**（40.24M，动作块 100）复核发现它**已经是 compute 绑死**（dataload 仅 7.6%）——
+**决定瓶颈的不是参数量而是每样本计算量**，动作块长度会把翻转点往左推。
+ACT 实测 **110 → 444 samples/s（4.04×）**，AMP +46%、fused Adam 再 +35%。
 调优提速 mlp **5.82×** / big **4.82×** / xl **4.14×**；AMP 收益跟着瓶颈走：
 IO 绑死时 +3%，compute 绑死时 **+103%**；fused Adam 再 +42% 且省 18% 显存。
 ⚠️ Turing 的 `is_bf16_supported()` 返回 True 但无原生张量核，必须用 fp16。
