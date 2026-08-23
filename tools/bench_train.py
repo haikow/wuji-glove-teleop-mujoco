@@ -22,6 +22,7 @@ import argparse
 import json
 import os
 import sys
+import statistics
 import threading
 import time
 
@@ -70,6 +71,27 @@ class GpuSampler(threading.Thread):
         self._stop_evt.set()
         self.join(timeout=1.0)
         return (sum(self.samples) / len(self.samples)) if self.samples else None
+
+
+def run_repeated(repeats, *a, **kw):
+    """重复跑取中位数并带上区间。
+
+    IO 绑死的配置对系统状态（页缓存、CPU 争用）非常敏感，实测单次之间能差 40%——
+    只报单次会得出错误的提速倍数。这里默认取中位数并把 min/max 一起报出来。
+    """
+    rs = [run_one(*a, **kw) for _ in range(max(repeats, 1))]
+    sp = sorted(r["samples_per_s"] for r in rs)
+    base = dict(rs[0])
+    base.update(samples_per_s=round(statistics.median(sp), 1),
+                samples_per_s_min=sp[0], samples_per_s_max=sp[-1],
+                repeats=len(rs),
+                spread_pct=round(100 * (sp[-1] - sp[0]) / max(statistics.median(sp), 1e-9), 1))
+    for k in ("pct_dataload", "pct_forward", "pct_backward", "pct_optimizer",
+              "gpu_util_pct", "peak_gpu_mb"):
+        vals = [r[k] for r in rs if r[k] is not None]
+        if vals:
+            base[k] = round(statistics.median(vals), 1)
+    return base
 
 
 def run_one(ds, model_kind, obs_dim, action_dim, device, batch_size, workers,
@@ -195,6 +217,9 @@ def main():
     ap.add_argument("--amp", default="both", choices=["off", "on", "both"])
     ap.add_argument("--amp-dtype", default="auto", choices=["auto", "fp16", "bf16"])
     ap.add_argument("--steps", type=int, default=60)
+    ap.add_argument("--repeats", type=int, default=3,
+                    help="每个配置重复几次取中位数。IO 绑死的配置单次波动可达 ±40%%，"
+                         "单次数字不可信")
     ap.add_argument("--compile", action="store_true", help="额外测一档 torch.compile")
     ap.add_argument("--fused-adam", action="store_true",
                     help="额外测一档 fused Adam（大模型上 optimizer 占比高时有效）")
@@ -226,42 +251,45 @@ def main():
     amp_modes = {"off": [None], "on": [amp_dtype], "both": [None, amp_dtype]}[args.amp]
     runs = []
 
-    print("%-6s %8s %6s %4s %6s %10s %6s %7s %7s %7s %7s %8s"
-          % ("model", "params M", "bs", "w", "amp", "samples/s", "GPU%",
-             "data%", "fwd%", "bwd%", "opt%", "mem MB"))
+    print("每个配置重复 %d 次取中位数（IO 绑死的配置单次波动可达 ±40%%）\n" % args.repeats)
+    print("%-6s %8s %6s %4s %6s %10s %6s %6s %7s %7s %7s %8s"
+          % ("model", "params M", "bs", "w", "amp", "samples/s", "±%", "GPU%",
+             "data%", "fwd%", "bwd%", "mem MB"))
 
     def show(r):
-        print("%-6s %8.3f %6d %4d %6s %10.1f %6s %7.1f %7.1f %7.1f %7.1f %8.1f"
+        print("%-6s %8.3f %6d %4d %6s %10.1f %5.0f%% %6s %7.1f %7.1f %7.1f %8.1f"
               % (r["model"], r["params_m"], r["batch_size"], r["num_workers"],
                  (r["amp"] or "off") + ("+f" if r.get("fused_adam") else ""),
-                 r["samples_per_s"],
+                 r["samples_per_s"], r.get("spread_pct", 0),
                  r["gpu_util_pct"] if r["gpu_util_pct"] is not None else "-",
                  r["pct_dataload"], r["pct_forward"], r["pct_backward"],
-                 r["pct_optimizer"], r["peak_gpu_mb"]))
+                 r["peak_gpu_mb"]))
 
     for mk in args.models:
         # 朴素基线：num_workers=0、无 AMP、小 batch —— 很多人默认就这么写
-        r = run_one(ds, mk, obs_dim, action_dim, device, args.batch_sizes[0],
-                    args.baseline_workers, None, args.steps)
+        r = run_repeated(args.repeats, ds, mk, obs_dim, action_dim, device,
+                         args.batch_sizes[0], args.baseline_workers, None, args.steps)
         r["tag"] = "baseline"
         runs.append(r)
         show(r)
         for bs in args.batch_sizes:
             for amp in amp_modes:
-                r = run_one(ds, mk, obs_dim, action_dim, device, bs,
-                            args.workers, amp, args.steps)
+                r = run_repeated(args.repeats, ds, mk, obs_dim, action_dim, device,
+                                 bs, args.workers, amp, args.steps)
                 r["tag"] = "tuned"
                 runs.append(r)
                 show(r)
         if args.fused_adam:
-            r = run_one(ds, mk, obs_dim, action_dim, device, args.batch_sizes[-1],
-                        args.workers, amp_modes[-1], args.steps, fused_adam=True)
+            r = run_repeated(args.repeats, ds, mk, obs_dim, action_dim, device,
+                             args.batch_sizes[-1], args.workers, amp_modes[-1],
+                             args.steps, fused_adam=True)
             r["tag"] = "fused_adam"
             runs.append(r)
             show(r)
         if args.compile:
-            r = run_one(ds, mk, obs_dim, action_dim, device, args.batch_sizes[-1],
-                        args.workers, amp_modes[-1], args.steps, compile_model=True)
+            r = run_repeated(args.repeats, ds, mk, obs_dim, action_dim, device,
+                             args.batch_sizes[-1], args.workers, amp_modes[-1],
+                             args.steps, compile_model=True)
             r["tag"] = "compiled"
             runs.append(r)
             show(r)

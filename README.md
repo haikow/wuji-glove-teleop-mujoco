@@ -506,7 +506,7 @@ rerun data/episodes/ep_xxx/episode.rrd  # 本地打开
 ```
 
 30 万帧实测：QC **26731 帧/s**、导出 **6846 帧/s**（730MB JSONL → 179MB parquet）、
-峰值内存 **815MB**；dataloader 调参后 **13 059 → 87 844 samples/s（6.73×）**。
+峰值内存 **815MB**；dataloader 调参后 **12 140 → 77 807 samples/s（6.41×，5 次中位数）**。
 
 导出那 6846 是优化后的数字：profile 发现 77% 的时间花在给**没有图像的数据集**跑
 `embed_images`（逐帧 + 每帧重建 Features schema），按实际列类型短路后 2.9~4.4×，
@@ -526,10 +526,12 @@ rerun data/episodes/ep_xxx/episode.rrd  # 本地打开
 ./venv312/bin/python tools/bench_infer.py --model data/models/bc_tap.pt
 ```
 
-**训练**（RTX 2060）：瓶颈翻转点在 **13M~118M 参数**之间——低于它 GPU 空转（0.1M MLP
-只有 6% 利用率、89% 时间在 dataload），高于它才轮到 AMP。AMP 收益跟着瓶颈走：
-IO 绑死时 +3%，compute 绑死时 **+103%**。fused Adam 再 +14% 且省 18% 显存。
+**训练**（RTX 2060，5 次重复取中位数）：瓶颈翻转点在 **13M~118M 参数**之间——低于它
+GPU 空转（0.1M MLP 只有 6% 利用率、89% 时间在 dataload），高于它才轮到 AMP。
+调优提速 mlp **5.82×** / big **4.82×** / xl **4.14×**；AMP 收益跟着瓶颈走：
+IO 绑死时 +3%，compute 绑死时 **+103%**；fused Adam 再 +42% 且省 18% 显存。
 ⚠️ Turing 的 `is_bf16_supported()` 返回 True 但无原生张量核，必须用 fp16。
+⚠️ IO 绑死的配置单次波动可达 40%，必须重复取中位数（工具默认 `--repeats 3`）。
 
 **推理**：BC baseline 单帧端到端 p99 **CPU 0.037ms / GPU 0.094ms** —— 小模型上 CPU 完胜，
 且 GPU 最坏延迟差 20 倍。占 8.33ms 帧预算 0.4%，余量 224×，可直接塞进遥操回路。
