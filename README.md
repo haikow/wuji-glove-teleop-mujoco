@@ -535,7 +535,10 @@ rerun data/episodes/ep_xxx/episode.rrd  # 本地打开
 **训练**（RTX 2060，重复取中位数）：MLP 探针测出翻转点在 13M~118M 参数之间，但拿
 **真实 ACT 策略**（40.24M，动作块 100）复核发现它**已经是 compute 绑死**（dataload 仅 7.6%）——
 **决定瓶颈的不是参数量而是每样本计算量**，动作块长度会把翻转点往左推。
-ACT 实测 **110 → 444 samples/s（4.04×）**，AMP +46%、fused Adam 再 +35%。
+ACT 实测 **115 → 499 samples/s（4.32×）**：workers/batch 1.86× → AMP fp16 3.27×
+→ fused Adam 3.76× → torch.compile 4.32×，峰值显存 1027 → 854 MB。
+⚠️ `torch 2.11.0+cu130` 这个 wheel 里 inductor 有类型注解缺陷、`torch.compile` 完全不可用
+（连两层 MLP 都编不了），工具内置了绕过补丁，见 findings §13。
 调优提速 mlp **5.82×** / big **4.82×** / xl **4.14×**；AMP 收益跟着瓶颈走：
 IO 绑死时 +3%，compute 绑死时 **+103%**；fused Adam 再 +42% 且省 18% 显存。
 ⚠️ Turing 的 `is_bf16_supported()` 返回 True 但无原生张量核，必须用 fp16。

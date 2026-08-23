@@ -377,11 +377,55 @@ GPU 上都空转，结论永远是"GPU 利用率个位数"。扫三档规模才�
 31.4%，但分段计时显示 92% 的墙钟时间在 fwd/bwd/opt 上。该 API 按约 20ms 采样，
 kernel 又多又碎时会大量漏采。**以分段占比为准，别信这个百分比。**
 
+### 逐项加码到 4.32×（含 torch.compile）
+
+同一次运行里逐项叠加（bs=16, w=8, 2 次中位数）：
+
+| 配置 | samples/s | 相对基线 | 峰值显存 |
+|---|---|---|---|
+| baseline（bs8, w0, fp32） | 115.5 | 1.00× | 1027 MB |
+| + workers / batch | 214.7 | 1.86× | 1029 MB |
+| + AMP fp16 | 377.5 | 3.27× | 916 MB |
+| + fused Adam | 434.2 | 3.76× | 916 MB |
+| **+ torch.compile** | **499.3** | **4.32×** | **854 MB** |
+
+`torch.compile` 在 fused 基础上再 **+15%，并省 7% 显存**（算子融合减少了中间张量）。
+只编译 `pol.model` 而不是整个 `ACTPolicy`——后者的 forward 里有归一化和 dict 组装，
+整体编译会频繁 graph break。
+
+### ⚠️ 这个 torch 构建里 `torch.compile` 本来是坏的
+
+第一次跑 `--compile` 直接崩，而且**连编译一个两层 MLP 都会崩**：
+
+```
+torch/_inductor/codegen/common.py:1927
+    class CSE(Generic[CSEVariableType, AugmentedKeyT])      ← 声明 2 个泛型参数
+torch/_inductor/codegen/cutedsl/cutedsl_kernel.py:77
+    cse: Optional[CSE[Any]] = None                          ← 只给了 1 个
+
+TypeError: Too few arguments for CSE; actual 1, expected 2
+```
+
+该模块光 `import` 就抛异常，所以 **`torch 2.11.0+cu130` 这个 wheel 里 inductor 整条路径不可用**。
+最小复现只要一行：
+
+```python
+import torch._inductor.codegen.cutedsl.cutedsl_kernel
+```
+
+`tools/bench_policy.py: patch_inductor_cse_typing()` 把缺的类型参数补上绕过它，
+并会在报告里注明打过补丁。**这是上游缺陷，可以提 issue**；换 torch 版本后该函数会
+自动检测到不需要补丁并跳过。
+
 **复现**：
 
 ```bash
 ./venv312/bin/python tools/bench_policy.py --dataset data/datasets/finger_tap \
     --repo-id local/wuji_finger_tap --batch-sizes 8 16 --repeats 3
+
+# 带 torch.compile（自动绕开上面那个 torch 缺陷）
+./venv312/bin/python tools/bench_policy.py --dataset data/datasets/finger_tap \
+    --repo-id local/wuji_finger_tap --batch-sizes 16 --repeats 2 --compile default
 ```
 
 **AMP 的收益完全跟着瓶颈走**（同 batch=1024 下 fp16 vs fp32）：

@@ -32,6 +32,37 @@ from tools.bench_train import GpuSampler  # noqa: E402
 ENV_DIM, STATE_DIM = 88, 20             # 88 = skeleton63 + glove_joints25；20 = 真机手
 
 
+def patch_inductor_cse_typing():
+    """绕开 torch 2.11.0+cu130 里 inductor 的一个打包缺陷。
+
+    `torch/_inductor/codegen/common.py` 把 CSE 声明为
+    `Generic[CSEVariableType, AugmentedKeyT]`（两个参数），但
+    `codegen/cutedsl/cutedsl_kernel.py:77` 写的是 `CSE[Any]`（只给一个），
+    于是该模块一被 import 就抛
+    `TypeError: Too few arguments for CSE; actual 1, expected 2`——
+    连编译一个两层 MLP 都会挂，等于这个构建里 torch.compile 完全不可用。
+
+    这里把缺的那个参数补上。返回是否打了补丁，便于在报告里注明。
+    """
+    import typing
+    try:
+        import torch._inductor.codegen.cutedsl.cutedsl_kernel  # noqa: F401
+        return False                                   # 能 import 说明不需要补
+    except TypeError:
+        pass
+    import torch._inductor.codegen.common as C
+
+    cse = C.CSE
+
+    def _class_getitem(cls, params):
+        if not isinstance(params, tuple):
+            params = (params, params)
+        return typing._GenericAlias(cse, params)
+
+    cse.__class_getitem__ = classmethod(_class_getitem)
+    return True
+
+
 def _slice_stats(stats, lo, hi, full=108):
     return {k: (v[lo:hi] if hasattr(v, "__len__") and len(v) == full else v)
             for k, v in stats.items()}
@@ -68,11 +99,17 @@ def to_batch(b, device):
     return out
 
 
-def run_one(ds, chunk, device, batch_size, workers, amp_dtype, steps, fused_adam):
+def run_one(ds, chunk, device, batch_size, workers, amp_dtype, steps, fused_adam,
+            compile_mode=None):
     from torch.utils.data import DataLoader
 
     pol = build_act(ds, chunk, device)
     n_params = sum(p.numel() for p in pol.parameters())
+    if compile_mode:
+        patch_inductor_cse_typing()
+        # 只编译 model 子模块：ACTPolicy.forward 里有归一化和 dict 组装，
+        # 整体 compile 会频繁 graph break，编译内层收益更稳。
+        pol.model = torch.compile(pol.model, mode=compile_mode)
     opt = torch.optim.Adam(pol.parameters(), lr=1e-5,
                            **({"fused": True} if fused_adam else {}))
     scaler = torch.amp.GradScaler("cuda", enabled=(amp_dtype == torch.float16))
@@ -108,7 +145,8 @@ def run_one(ds, chunk, device, batch_size, workers, amp_dtype, steps, fused_adam
         return (t1 - t0, t2 - t1, t3 - t2, time.perf_counter() - t3,
                 batch["action"].shape[0])
 
-    for _ in range(3):
+    # compile 首次要 trace+codegen，预热次数要给足，否则编译开销会算进吞吐
+    for _ in range(12 if compile_mode else 3):
         step()
     sampler = GpuSampler()
     sampler.start()
@@ -128,7 +166,8 @@ def run_one(ds, chunk, device, batch_size, workers, amp_dtype, steps, fused_adam
     del it, dl, pol, opt
     torch.cuda.empty_cache()
 
-    return {"params_m": round(n_params / 1e6, 2), "batch_size": batch_size,
+    return {"params_m": round(n_params / 1e6, 2), "compile": compile_mode,
+            "batch_size": batch_size,
             "num_workers": workers, "chunk": chunk,
             "amp": None if amp_dtype is None else str(amp_dtype).replace("torch.", ""),
             "fused_adam": fused_adam,
@@ -141,8 +180,8 @@ def run_one(ds, chunk, device, batch_size, workers, amp_dtype, steps, fused_adam
             "peak_gpu_mb": round(peak, 1)}
 
 
-def repeated(repeats, *a):
-    rs = [run_one(*a) for _ in range(max(repeats, 1))]
+def repeated(repeats, *a, **kw):
+    rs = [run_one(*a, **kw) for _ in range(max(repeats, 1))]
     sp = sorted(r["samples_per_s"] for r in rs)
     out = dict(rs[0])
     out.update(samples_per_s=round(statistics.median(sp), 1),
@@ -166,6 +205,8 @@ def main():
     ap.add_argument("--baseline-workers", type=int, default=0)
     ap.add_argument("--steps", type=int, default=30)
     ap.add_argument("--repeats", type=int, default=3)
+    ap.add_argument("--compile", nargs="*", default=[],
+                    help="额外测 torch.compile，可给多个 mode，如 default max-autotune")
     ap.add_argument("--json-out", default="")
     args = ap.parse_args()
 
@@ -194,7 +235,8 @@ def main():
     def show(tag, r):
         print("%-10s %5d %4d %7s %10.1f %5.0f%% %6s %7.1f %7.1f %7.1f %9.1f"
               % (tag, r["batch_size"], r["num_workers"],
-                 (r["amp"] or "off") + ("+f" if r["fused_adam"] else ""),
+                 (r["amp"] or "off") + ("+f" if r["fused_adam"] else "")
+                 + ("+c" if r.get("compile") else ""),
                  r["samples_per_s"], r.get("spread_pct", 0),
                  r["gpu_util_pct"] if r["gpu_util_pct"] is not None else "-",
                  r["pct_dataload"], r["pct_forward"], r["pct_backward"],
@@ -218,6 +260,16 @@ def main():
     r["tag"] = "fused"
     runs.append(r)
     show("fused", r)
+
+    if args.compile and patch_inductor_cse_typing():
+        print("\n[注] 已打补丁绕开 torch %s 的 inductor 类型注解缺陷，"
+              "否则 torch.compile 在本构建上完全不可用" % torch.__version__)
+    for mode in args.compile:
+        r = repeated(args.repeats, ds, args.chunk, device, args.batch_sizes[-1],
+                     args.workers, amp_dtype, args.steps, True, mode)
+        r["tag"] = "compile:" + mode
+        runs.append(r)
+        show(r["tag"][:10], r)
 
     base_r = runs[0]
     best = max(runs, key=lambda x: x["samples_per_s"])
