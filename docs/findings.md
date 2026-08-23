@@ -266,6 +266,75 @@ skip_embed_images_when_no_media`，`--no-skip-embed` 可关掉做对比）。
 `wuji_provenance.json` 的 `export_seconds` / `export_frames_per_s` /
 `skipped_embed_images`；低于 500 帧/s 会直接告警。拿它和 §8 的基准比即可。
 
+## 13. 训练侧：IO→compute 的临界点在哪
+
+`tools/bench_train.py`。只测 BC baseline 那个 0.1M 的 MLP 是没意义的——它在任何现代
+GPU 上都空转，结论永远是"GPU 利用率个位数"。扫三档规模才能定出**瓶颈翻转的临界点**，
+那个点决定了要不要上 AMP、batch 开多大、worker 给几个。
+
+环境：RTX 2060（6GB, **compute 7.5 / Turing**），22350 帧数据集，obs=108 → action=20。
+
+| 模型 | 参数 | 朴素基线¹ | 调优后 | 倍数 | 最优配置瓶颈 | GPU 利用率 | 峰值显存 |
+|---|---|---|---|---|---|---|---|
+| mlp | 0.10M | 10 502 | 73 985 | 7.04× | **IO**（89% dataload） | 8.4% → 6.0% | 24 MB |
+| big | 12.85M | 8 104 | 39 835 | 4.92× | **IO**（63% dataload） | 15.6% → 26.3% | 276 MB |
+| xl | 118M | 4 005 | **14 694** | 3.67× | **compute** | 59.8% → 74.5% | 1955 MB |
+
+¹ 朴素基线 = `num_workers=0` + 无 AMP + batch 256，很多人默认就这么写。单位 samples/s。
+
+**临界点在 13M~118M 参数之间**。低于它，GPU 是空的，砸显卡没用，钱该花在 CPU 核数和
+数据格式上；高于它才轮到 AMP / fused optimizer / compile。
+
+**AMP 的收益完全跟着瓶颈走**（同 batch=1024 下 fp16 vs fp32）：
+
+| 模型 | fp32 | fp16 | 收益 |
+|---|---|---|---|
+| mlp（IO 绑死） | 71 627 | 73 985 | **+3%**（白开） |
+| big | 29 622 | 39 835 | +34% |
+| xl（compute 绑死） | 6 449 | 13 090 | **+103%** |
+
+⚠️ **Turing 必须用 fp16 不能用 bf16**：`torch.cuda.is_bf16_supported()` 在 compute 7.5
+上返回 True，但没有原生 bf16 张量核，走模拟路径反而更慢。脚本按 capability 自动选
+（`>= 8.0` 用 bf16，否则 fp16），`--amp-dtype` 可强制。
+
+**fused Adam**：xl 上 optimizer 一度占 44.3% 的步时间——1.18 亿参数的逐张量 elementwise
+kernel 太多。换 `Adam(fused=True)` 后：
+
+```
+12 887 → 14 694 samples/s (+14%)    optimizer 占比 44.3% → 27.1%    峰值显存 2379 → 1955 MB (-18%)
+```
+
+**复现**：
+
+```bash
+./venv312/bin/python tools/bench_train.py --dataset data/datasets/finger_tap \
+    --repo-id local/wuji_finger_tap --models mlp big xl --batch-sizes 256 1024 --fused-adam
+```
+
+## 14. 推理侧：策略能不能塞进遥操回路
+
+遥操的时间预算是硬的：手套 **120Hz → 每帧 8.33ms**；端到端（出帧→retarget→zenoh→
+伺服→反馈）实测 **33ms**（§4）。所以只测 **batch=1 的尾延迟**——逐帧同步调用，
+决定掉不掉帧的是 p99 不是均值。
+
+`tools/bench_infer.py`，BC baseline（0.099M 参数），2000 次采样：
+
+| 部署 | p50 | p95 | p99 | max | 占帧预算(p99) |
+|---|---|---|---|---|---|
+| **CPU** | 0.026 | 0.036 | **0.037 ms** | 0.057 | **0.4%** |
+| CUDA | 0.060 | 0.067 | 0.094 ms | **1.402** | 1.1% |
+
+（端到端口径：numpy → tensor → H2D → forward → D2H → numpy，不是只测 forward。）
+
+**结论：CPU 完胜 GPU。** 小模型上一次 H2D + kernel launch 的固定开销盖过计算，
+而且 GPU 的**最坏延迟差 20 倍**（1.40ms vs 0.071ms）——实时回路里尾延迟才是要命的。
+同理 fp16 在 batch=1 上也是负收益（p50 0.084 vs 0.050，autocast 开销大于收益）。
+
+余量 **224×**，叠加到 33ms 端到端上只 +0.1%。**这个策略可以直接塞进回路。**
+反推可用预算：只要单帧 p99 < 4ms（半个帧预算）都算安全，对应模型规模远大于当前 baseline。
+
+**复现**：`./venv312/bin/python tools/bench_infer.py --model data/models/bc_tap.pt`
+
 ## 10. CI 抓到的可移植性问题
 
 无头 runner 上缺 EGL 时，`import mujoco` 会在 **import 期**抛

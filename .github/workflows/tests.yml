@@ -40,6 +40,9 @@ jobs:
       - name: 导出筛选 / 溯源分组守卫 / 标注 / 手型解析
         run: python tests/test_export_label.py
 
+      - name: 压测工具纯逻辑（不碰 GPU）
+        run: python tests/test_bench_tools.py
+
       - name: 合成缺陷样本端到端过一遍 QC
         run: |
           python tools/synth_episode.py --out /tmp/fw/episodes --defect all
