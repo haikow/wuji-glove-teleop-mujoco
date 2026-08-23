@@ -52,6 +52,15 @@ FAIL_FLAGS = {
 }
 
 
+# numpy 只做可选加速：滞后扫描是 O(滞后档数 × 帧数 × 关节数) 的三重循环，
+# 纯 Python 下实测把 QC 从 79141 拖到 10972 帧/s。有 numpy 就走向量化路径，
+# 没有就回退纯 Python —— 保住"CI 只装标准库也能跑 QC"这条性质。
+try:
+    import numpy as _np
+except ImportError:
+    _np = None
+
+
 # ---- 无 numpy 的小统计工具 ----
 
 def _median(xs):
@@ -101,6 +110,72 @@ def _timeline(frames):
     if all(isinstance(t, (int, float)) for t in host) and host:
         return list(host), "host"
     return [], "none"
+
+
+def _lag_scan(cmd, fb, max_lag):
+    """扫 0..max_lag 的滞后，返回 (零滞后 MAE, 最优滞后, 最优 MAE)。
+
+    零滞后的 MAE 里混着通信+伺服延迟；扫描后的最小值才是真正的跟踪偏差，
+    取到最小值的那个滞后就是端到端延迟估计。
+    """
+    if _np is not None:
+        # 不能直接 asarray：join 不上 action 的帧在 cmd 里是 None，形状不齐会抛
+        # ValueError 然后静默回退到纯 Python（这个坑实测吃掉了整个向量化收益）。
+        # 也不能把这些行删掉——滞后是按帧索引算的，删行会打乱对齐。填 NaN 再掩码。
+        dims = [len(x) for x in list(cmd) + list(fb) if isinstance(x, (list, tuple))]
+        d = min(dims) if dims else 0
+        C = F = None
+        if d:
+            C = _np.full((len(cmd), d), _np.nan)
+            F = _np.full((len(fb), d), _np.nan)
+            for i, c in enumerate(cmd):
+                if isinstance(c, (list, tuple)) and len(c) >= d:
+                    C[i] = c[:d]
+            for i, v in enumerate(fb):
+                if isinstance(v, (list, tuple)) and len(v) >= d:
+                    F[i] = [x if isinstance(x, (int, float)) else _np.nan
+                            for x in v[:d]]
+        if C is not None:
+            base = best = None
+            best_lag = 0
+            for lag in range(0, max(max_lag, 1)):
+                a = C[:len(C) - lag] if lag else C
+                b = F[lag:]
+                m = min(len(a), len(b))
+                if m == 0:
+                    continue
+                diff = _np.abs(b[:m] - a[:m])
+                ok = _np.isfinite(diff)
+                if not ok.any():
+                    continue
+                v = float(diff[ok].mean())
+                if lag == 0:
+                    base = v
+                if best is None or v < best:
+                    best_lag, best = lag, v
+            return base, best_lag, best
+
+    def _mae(lag):
+        tot = cnt = 0
+        for a in range(len(cmd) - lag):
+            c, f2 = cmd[a], fb[a + lag]
+            if not isinstance(c, list):
+                continue
+            for j in range(min(len(c), len(f2))):
+                x, y = c[j], f2[j]
+                if isinstance(x, (int, float)) and isinstance(y, (int, float)) \
+                        and math.isfinite(x) and math.isfinite(y):
+                    tot += abs(y - x)
+                    cnt += 1
+        return (tot / cnt) if cnt else None
+
+    base = _mae(0)
+    best_lag, best = 0, base
+    for lag in range(1, max(max_lag, 1)):
+        v = _mae(lag)
+        if v is not None and (best is None or v < best):
+            best_lag, best = lag, v
+    return base, best_lag, best
 
 
 def compute_metrics(frames):
@@ -205,26 +280,8 @@ def compute_metrics(frames):
         fb = [v for _, v in hs]
         dt_ms = (m.get("dt_median_s") or 0.00833) * 1000.0
 
-        def _mae(lag):
-            tot = cnt = 0
-            for a in range(len(cmd) - lag):
-                c, f2 = cmd[a], fb[a + lag]
-                if not isinstance(c, list):
-                    continue
-                for j in range(min(len(c), len(f2))):
-                    x, y = c[j], f2[j]
-                    if isinstance(x, (int, float)) and isinstance(y, (int, float)) \
-                            and math.isfinite(x) and math.isfinite(y):
-                        tot += abs(y - x)
-                        cnt += 1
-            return (tot / cnt) if cnt else None
-
-        base = _mae(0)
-        best_lag, best = 0, base
-        for lag in range(1, min(25, len(cmd) // 4)):     # 最多扫 ~200ms
-            v = _mae(lag)
-            if v is not None and (best is None or v < best):
-                best_lag, best = lag, v
+        max_lag = min(25, len(cmd) // 4)                # 最多扫 ~200ms
+        base, best_lag, best = _lag_scan(cmd, fb, max_lag)
         m["track_mae_rad"] = round(base, 5) if base is not None else None
         m["track_mae_best_rad"] = round(best, 5) if best is not None else None
         m["track_best_lag_frames"] = best_lag

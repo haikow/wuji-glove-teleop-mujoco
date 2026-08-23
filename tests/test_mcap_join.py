@@ -231,6 +231,60 @@ class McapJoinTest(unittest.TestCase):
                          [0, 3, 4, 7, 8, 16, 19])
 
 
+    # ---- QC 性能优化的正确性边界 ----
+    def test_lag_scan_numpy_matches_pure_python(self):
+        """向量化路径必须和纯 Python 逐位一致，否则优化就是改结果。"""
+        import tools.qc_episode as q
+        from tools.episode_format import load_frames
+        self._build(n=200, hand_lag=5)
+        frames = load_frames(self.ep)
+        m_np = q.compute_metrics(frames)
+        old, q._np = q._np, None
+        try:
+            m_py = q.compute_metrics(frames)
+        finally:
+            q._np = old
+        for k in ("track_mae_rad", "track_mae_best_rad", "track_best_lag_frames"):
+            self.assertEqual(m_np[k], m_py[k], k)
+
+    def test_lag_scan_handles_missing_action_rows(self):
+        """join 不上 action 的帧在 cmd 里是 None——直接 asarray 会抛 ValueError
+        然后静默回退纯 Python，吃掉全部向量化收益（真机上实测踩到过）。
+        """
+        import tools.qc_episode as q
+        from tools.episode_format import load_frames
+        # 只给一半帧写 action，制造 None 行
+        seqs = list(range(1000, 1200))
+        write_obs_mcap(os.path.join(self.ep, "obs.mcap"), seqs, hand_lag=3)
+        idx = {s: i for i, s in enumerate(seqs)}
+        write_actions(os.path.join(self.ep, "action.jsonl"), seqs[::2], seq_index=idx)
+        write_meta(self.ep, {"episode_id": "ep_test_right", "side": "right",
+                             "obs_container": "mcap"})
+        frames = load_frames(self.ep)
+        self.assertTrue(any(f.get("action") is None and f.get("hand_state")
+                            for f in frames))
+        m_np = q.compute_metrics(frames)
+        old, q._np = q._np, None
+        try:
+            m_py = q.compute_metrics(frames)
+        finally:
+            q._np = old
+        self.assertEqual(m_np["track_best_lag_frames"], m_py["track_best_lag_frames"])
+        self.assertAlmostEqual(m_np["track_mae_best_rad"], m_py["track_mae_best_rad"],
+                               places=9)
+
+    def test_joint_states_decimation_preserves_metrics(self):
+        """抽稀 joint_states 只为省解码，不能改判定结果。"""
+        import tools.episode_format as ef
+        import tools.qc_episode as q
+        self._build(n=200, hand_lag=4)
+        full = list(ef._iter_frames_mcap(self.ep, joint_states_per_frame=0))
+        thin = list(ef._iter_frames_mcap(self.ep))
+        self.assertEqual(len(full), len(thin))          # 帧数不变
+        mf, mt = q.compute_metrics(full), q.compute_metrics(thin)
+        self.assertEqual(mf["track_best_lag_frames"], mt["track_best_lag_frames"])
+        self.assertEqual(mf["hand_state_ratio"], mt["hand_state_ratio"])
+
     # ---- Rerun 导出 ----
     def test_rerun_export(self):
         """--rerun 落 .rrd，且骨架/指令/实测/误差通道都在。"""

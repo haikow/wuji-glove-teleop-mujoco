@@ -283,17 +283,34 @@ def _nearest_join(times, values, targets):
     return out
 
 
-def _iter_frames_mcap(ep_dir):
-    """解 obs.mcap（jsonschema/JSON 编码）并按 header.seq join 上 action.jsonl。"""
+# 真机 joint_states 跑 ~999Hz、手套帧只有 120Hz —— 实测它占了 MCAP 里 80.7% 的消息
+# 和 16.3/21.8 MB 的 JSON 载荷，而每帧最后只保留 1 个最近的。全解等于白解 8 倍。
+# 这里按 log_time 抽稀（不解 JSON 就能拿到），只解到「每帧约 N 个」的密度。
+JOINT_STATES_PER_FRAME = 2       # 保留冗余度：最近邻误差 ≤ 半个抽稀间隔
+_TARGET_FRAME_HZ = 120.0
+
+
+def _iter_frames_mcap(ep_dir, joint_states_per_frame=JOINT_STATES_PER_FRAME):
+    """解 obs.mcap（jsonschema/JSON 编码）并按 header.seq join 上 action.jsonl。
+
+    joint_states_per_frame=0 表示不抽稀（全解，最精确但慢一倍）。
+    """
     from mcap.reader import make_reader
 
     by_seq = {}
     order = []
     js_t, js_v = [], []          # 真机手 joint_states（高频，按时间戳并）
+    # log_time 单位 ns；按目标密度算最小间隔
+    min_gap_ns = (1e9 / (_TARGET_FRAME_HZ * joint_states_per_frame)
+                  if joint_states_per_frame else 0.0)
+    last_js_log = None
     with open(obs_mcap_path(ep_dir), "rb") as f:
         for _sch, chan, msg in make_reader(f).iter_messages():
             topic = chan.topic.rsplit("/", 1)[-1]
             if topic == "joint_states":
+                if min_gap_ns and last_js_log is not None \
+                        and msg.log_time - last_js_log < min_gap_ns:
+                    continue                     # 抽稀：连 JSON 都不解
                 try:
                     d = json.loads(msg.data)
                 except (json.JSONDecodeError, UnicodeDecodeError):
@@ -301,6 +318,7 @@ def _iter_frames_mcap(ep_dir):
                 ts = (d.get("header") or {}).get("timestamp_us")
                 if ts is None:
                     continue
+                last_js_log = msg.log_time
                 pos = [None] * 20
                 for j in (d.get("joints") or []):
                     k = nid_to_flat(j.get("nid", 0))

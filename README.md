@@ -506,7 +506,8 @@ rerun data/episodes/ep_xxx/episode.rrd  # 本地打开
 ```
 
 30 万帧合成数据实测：QC **26731 帧/s**（JSONL 容器；**真机 MCAP 路径只有 2961 帧/s**，
-差 9 倍来自 MCAP 逐帧 JSON 解码和真机反馈的滞后扫描）、导出 **6846 帧/s**（730MB → 179MB parquet）、
+差 9 倍来自 MCAP 逐帧 JSON 解码和真机反馈的滞后扫描；
+优化后 **6148 帧/s（2.06×）**，见 findings §8）、导出 **6846 帧/s**（730MB → 179MB parquet）、
 峰值内存 **815MB**；dataloader 调参后 **12 140 → 77 807 samples/s（6.41×，5 次中位数）**。
 
 导出那 6846 是优化后的数字：profile 发现 77% 的时间花在给**没有图像的数据集**跑
