@@ -195,6 +195,56 @@ def repeated(repeats, *a, **kw):
     return out
 
 
+FRAME_BUDGET_MS = 1000.0 / 120.0        # 手套 120Hz
+E2E_LATENCY_MS = 33.0                   # 实测端到端遥操延迟（findings §4）
+
+
+def _pct(xs, q):
+    s2 = sorted(xs)
+    return s2[min(int(round(q * (len(s2) - 1))), len(s2) - 1)]
+
+
+def bench_inference(ds, chunk, device, frames=600, warmup=120):
+    """部署口径的推理延迟。
+
+    ACT 的 select_action 维护动作队列：只有队列空时才真跑模型，其余帧只是
+    popleft()。所以延迟不是均匀的，而是**每 chunk 帧一个尖峰**。
+    决定掉不掉帧的是那个尖峰能不能塞进单帧预算，不是平均值。
+    """
+    pol = build_act(ds, chunk, device).eval()
+    n_steps = pol.config.n_action_steps
+    obs = {
+        "observation.environment_state": torch.randn(1, ENV_DIM, device=device),
+        "observation.state": torch.randn(1, STATE_DIM, device=device),
+    }
+    with torch.no_grad():
+        for _ in range(warmup):
+            pol.select_action(obs)
+        if device.type == "cuda":
+            torch.cuda.synchronize()
+        lat, is_spike = [], []
+        for _ in range(frames):
+            empty_before = len(pol._action_queue) == 0
+            t0 = time.perf_counter()
+            pol.select_action(obs)
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+            lat.append((time.perf_counter() - t0) * 1000.0)
+            is_spike.append(empty_before)
+    spikes = [v for v, sp in zip(lat, is_spike) if sp]
+    cheap = [v for v, sp in zip(lat, is_spike) if not sp]
+    del pol
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+    return {"device": device.type, "n_action_steps": n_steps,
+            "frames": frames, "spike_count": len(spikes),
+            "spike_p50": round(_pct(spikes, .5), 3) if spikes else None,
+            "spike_p99": round(_pct(spikes, .99), 3) if spikes else None,
+            "spike_max": round(max(spikes), 3) if spikes else None,
+            "queue_p99": round(_pct(cheap, .99), 4) if cheap else None,
+            "amortized_ms": round(sum(lat) / len(lat), 4)}
+
+
 def main():
     ap = argparse.ArgumentParser(description="真实策略（ACT）训练压测")
     ap.add_argument("--dataset", required=True)
@@ -207,6 +257,9 @@ def main():
     ap.add_argument("--repeats", type=int, default=3)
     ap.add_argument("--compile", nargs="*", default=[],
                     help="额外测 torch.compile，可给多个 mode，如 default max-autotune")
+    ap.add_argument("--infer", action="store_true",
+                    help="只测部署口径的推理延迟（select_action 尖峰 vs 摊薄）")
+    ap.add_argument("--infer-frames", type=int, default=600)
     ap.add_argument("--json-out", default="")
     args = ap.parse_args()
 
@@ -222,6 +275,41 @@ def main():
              str(amp_dtype).replace("torch.", "")))
 
     base = LeRobotDataset(repo_id=args.repo_id, root=args.dataset)
+
+    if args.infer:
+        print("部署口径推理延迟（chunk=%d，每 %d 帧一次真推理）\n" % (args.chunk, args.chunk))
+        devs = [torch.device("cpu"), torch.device("cuda")]
+        rows = []
+        print("%-6s %10s %10s %10s %11s %12s  %s"
+              % ("device", "尖峰 p50", "尖峰 p99", "尖峰 max", "队列帧 p99",
+                 "摊薄/帧", "尖峰占帧预算"))
+        for d in devs:
+            r = bench_inference(base, args.chunk, d, args.infer_frames)
+            rows.append(r)
+            print("%-6s %9.3f %9.3f %9.3f %10.4f %11.4f  %6.0f%%"
+                  % (r["device"], r["spike_p50"], r["spike_p99"], r["spike_max"],
+                     r["queue_p99"], r["amortized_ms"],
+                     100 * r["spike_p99"] / FRAME_BUDGET_MS))
+        best = min(rows, key=lambda r: r["spike_p99"])
+        print("\n=== 结论 ===")
+        print("帧预算 %.2f ms（120Hz）；最优部署 %s，尖峰 p99 = %.3f ms"
+              % (FRAME_BUDGET_MS, best["device"], best["spike_p99"]))
+        if best["spike_p99"] < FRAME_BUDGET_MS:
+            print("  尖峰塞得进单帧预算，余量 %.1f×；摊薄到每帧只 %.4f ms"
+                  % (FRAME_BUDGET_MS / best["spike_p99"], best["amortized_ms"]))
+        else:
+            print("  ⚠ 尖峰超出单帧预算 %.2f×——那一帧会掉，需要异步推理或缩小 chunk"
+                  % (best["spike_p99"] / FRAME_BUDGET_MS))
+        print("  叠加到 %.0fms 端到端遥操延迟：尖峰帧 %.2f ms（+%.1f%%）"
+              % (E2E_LATENCY_MS, E2E_LATENCY_MS + best["spike_p99"],
+                 100 * best["spike_p99"] / E2E_LATENCY_MS))
+        if args.json_out:
+            with open(args.json_out, "w") as f:
+                json.dump({"frame_budget_ms": FRAME_BUDGET_MS, "runs": rows}, f,
+                          ensure_ascii=False, indent=2)
+            print("\n结果 → %s" % args.json_out)
+        return 0
+
     dt = {"action": [i / base.meta.fps for i in range(args.chunk)]}
     ds = LeRobotDataset(repo_id=args.repo_id, root=args.dataset, delta_timestamps=dt)
     print("数据集 %d 帧  fps=%d  动作块=%d（每样本 %d 步动作）\n"
